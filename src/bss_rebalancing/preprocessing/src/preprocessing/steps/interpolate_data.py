@@ -17,6 +17,7 @@ from haversine import haversine_vector, Unit
 from tqdm import tqdm
 
 from preprocessing.config import DEFAULT_CONFIG, PreprocessingConfig
+from preprocessing.core.sources import Source, get_source
 from preprocessing.core.graph import load_graph
 from preprocessing.core.utils import nodes_within_radius, reorder_df
 
@@ -270,7 +271,7 @@ def build_pmf_matrix(
     return result_df
 
 
-def run(config: PreprocessingConfig) -> None:
+def run(config: PreprocessingConfig, source: Source) -> None:
     """Run the interpolate data step."""
     print("Initializing the graph")
     graph = load_graph(config.graph_path)
@@ -299,7 +300,7 @@ def run(config: PreprocessingConfig) -> None:
             matrix_path = os.path.join(
                 config.data_path,
                 "matrices",
-                config.month_str,
+                source.month_str,
                 day.lower()
             )
             rate_matrix_file = os.path.join(matrix_path, f"{str(timeslot).zfill(2)}-rate-matrix.csv")
@@ -343,15 +344,20 @@ def main():
     """CLI entry point for interpolate_data."""
     parser = argparse.ArgumentParser(description="Interpolate rate matrices to build PMF matrices.")
     parser.add_argument("--data-path", type=str, default=DEFAULT_CONFIG.data_path, help="Path to data directory.")
-    parser.add_argument("--months", type=str, default="9,10", help="Comma-separated months to process.")
+    parser.add_argument("--source", type=str, required=True, help="Source id from sources.json.")
+    parser.add_argument("--sources-json", type=str, default="core/sources.json")
     parser.add_argument("--radius", type=int, default=500, help="Interpolation radius in meters.")
 
     args = parser.parse_args()
 
-    months = [int(m.strip()) for m in args.months.split(",")]
-    config = PreprocessingConfig(data_path=args.data_path, months=months, interpolation_radius=args.radius)
-
-    run(config)
+    src = get_source(args.sources_json, args.source)
+    config = PreprocessingConfig(
+        source_id=src.id,
+        sources_json=args.sources_json,
+        data_path=args.data_path,
+        interpolation_radius=args.radius,
+    )
+    run(config, src)
 
 
 if __name__ == "__main__":

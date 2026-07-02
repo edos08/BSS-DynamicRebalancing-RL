@@ -10,6 +10,7 @@ import os
 import pickle
 
 from preprocessing.config import DEFAULT_CONFIG, PreprocessingConfig
+from preprocessing.core.sources import Source, get_source
 from preprocessing.core.graph import load_graph
 from preprocessing.core.grid import (
     assign_nodes_to_cells,
@@ -20,7 +21,7 @@ from preprocessing.core.grid import (
 from preprocessing.core.plotting import plot_graph_with_grid
 
 
-def run(config: PreprocessingConfig) -> None:
+def run(config: PreprocessingConfig, source: Source) -> None:
     """
     Run the truck grid preprocessing step.
 
@@ -42,8 +43,16 @@ def run(config: PreprocessingConfig) -> None:
     cell_dict = remove_empty_cells(cell_dict)
 
     print("Setting up cell properties...")
-    for cell in cell_dict.values():
-        cell.set_center_node(graph)
+    to_remove = []
+    for key, cell in cell_dict.items():
+        try:
+            cell.set_center_node(graph)
+        except Exception as e:
+            print(f"WARNING: {e}")
+            to_remove.append(key)
+
+    for key in to_remove:
+        cell_dict.pop(key)
 
     print("Setting adjacent cells...")
     set_adjacent_cells(cell_dict)
@@ -58,28 +67,24 @@ def run(config: PreprocessingConfig) -> None:
 
 
 def main():
-    """CLI entry point for preprocess_truck_grid."""
     parser = argparse.ArgumentParser(description="Preprocess the truck grid data.")
     parser.add_argument("--data-path", type=str, default=DEFAULT_CONFIG.data_path, help="Path to data directory.")
-    parser.add_argument("--cell-size", type=int, default=300, help="Cell size in meters.")
+    parser.add_argument("--source", type=str, required=True, help="Source id from sources.json.")
+    parser.add_argument("--sources-json", type=str, default="core/sources.json")
+    parser.add_argument("--cell-size", type=int, default=None, help="Cell size in meters (defaults to source's cell_size).")
     parser.add_argument("--plot", action="store_true", help="Plot the grid after processing.")
     parser.add_argument("--plot-path", type=str, default=None, help="Path to save the plot figure.")
 
     args = parser.parse_args()
 
-    config = PreprocessingConfig(data_path=args.data_path, cell_size=args.cell_size)
-    run(config)
-
-    if args.plot:
-        from preprocessing.core.graph import load_graph
-
-        graph = load_graph(config.graph_path)
-        with open(os.path.join(config.data_path, config.cell_data_path), "rb") as f:
-            cell_dict = pickle.load(f)
-        if args.plot_path:
-            plot_graph_with_grid(graph, cell_dict, plot_center_nodes=True, save_path=args.plot_path)
-        else:
-            plot_graph_with_grid(graph, cell_dict, plot_center_nodes=True)
+    src = get_source(args.sources_json, args.source)
+    config = PreprocessingConfig(
+        source_id=src.id,
+        sources_json=args.sources_json,
+        data_path=args.data_path,
+        cell_size=args.cell_size if args.cell_size is not None else src.cell_size,
+    )
+    run(config, src)
 
 
 if __name__ == "__main__":

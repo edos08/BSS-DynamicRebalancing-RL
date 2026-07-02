@@ -8,8 +8,9 @@ import pickle
 import sys
 import time
 
-from preprocessing.config import PreprocessingConfig
+from preprocessing.config import PreprocessingConfig, DEFAULT_SOURCES_JSON
 from preprocessing.core.utils import format_time
+from preprocessing.core.sources import get_source
 
 
 def create_parser() -> argparse.ArgumentParser:
@@ -47,6 +48,19 @@ Examples:
     )
 
     parser.add_argument(
+        "--source",
+        type=str, required=True,
+        help="Source id from sources.json (e.g. 'bluebikes', 'citibike')"
+    )
+
+    parser.add_argument(
+        "--sources-json",
+        type=str,
+        default=DEFAULT_SOURCES_JSON,
+        help="Path to sources.json (default: bundled with the package)"
+    )
+
+    parser.add_argument(
         "--steps",
         type=str,
         default=None,
@@ -58,20 +72,6 @@ Examples:
         type=str,
         default=None,
         help="Comma-separated list of steps to skip",
-    )
-
-    parser.add_argument(
-        "--year",
-        type=int,
-        default=2022,
-        help="Year of data to process (default: 2022)",
-    )
-
-    parser.add_argument(
-        "--months",
-        type=str,
-        default="9,10",
-        help="Comma-separated list of months to process (default: 9,10)",
     )
 
     parser.add_argument(
@@ -94,13 +94,6 @@ Examples:
         "-v",
         action="store_true",
         help="Enable verbose output",
-    )
-
-    parser.add_argument(
-        "--bbox",
-        type=str,
-        default="[42.36889381,42.35248869,-71.07231001,-71.11736849]",
-        help="Bounding box for data download in format [north,south,east,west]",
     )
 
     return parser
@@ -164,8 +157,9 @@ def run_plot_mode(config: PreprocessingConfig, plot_mode: str) -> None:
         print(f"\nPlot saved to: {output_file}")
 
 
-def run_pipeline(config: PreprocessingConfig, steps: list, verbose: bool = False):
+def run_pipeline(config: PreprocessingConfig, source, steps: list, verbose: bool = False):
     """Run the preprocessing pipeline with the given configuration."""
+    from datetime import datetime, timezone
     from preprocessing.steps import (
         create_ev_matrices,
         download_trips,
@@ -175,6 +169,7 @@ def run_pipeline(config: PreprocessingConfig, steps: list, verbose: bool = False
         preprocess_distance_matrix,
         preprocess_nodes_dictionary,
     )
+    from preprocessing.core.manifest import write_manifest
 
     step_mapping = {
         "download": ("Downloading trip data", download_trips.run),
@@ -195,8 +190,10 @@ def run_pipeline(config: PreprocessingConfig, steps: list, verbose: bool = False
     os.makedirs(config.utils_path, exist_ok=True)
 
     # Start timing
+    pipeline_start_dt = datetime.now(timezone.utc)
     pipeline_start = time.time()
     step_times = {}
+    completed_steps = []
 
     for step_name in steps:
         if step_name not in step_mapping:
@@ -216,21 +213,21 @@ def run_pipeline(config: PreprocessingConfig, steps: list, verbose: bool = False
         step_start = time.time()
 
         try:
-            step_func(config)
+            step_func(config, source)
         except Exception as e:
             print(f"Error in step '{step_name}': {e}")
             if verbose:
                 import traceback
-
                 traceback.print_exc()
+            # No manifest on failure — a manifest describing a broken run
+            # is strictly worse than no manifest, it just lies with confidence.
             sys.exit(1)
 
-        # Record step time
         step_elapsed = time.time() - step_start
         step_times[step_name] = step_elapsed
+        completed_steps.append(step_name)
         print(f"✓ Step completed in {format_time(step_elapsed)}")
 
-    # Calculate total time
     total_elapsed = time.time() - pipeline_start
 
     print(f"\n{'=' * 60}")
@@ -247,23 +244,21 @@ def run_pipeline(config: PreprocessingConfig, steps: list, verbose: bool = False
     print(f"  {'Total':15} : {format_time(total_elapsed):>12}")
     print(f"{'=' * 60}")
 
+    # Only write the manifest once every requested step actually finished.
+    write_manifest(config, source, completed_steps, pipeline_start_dt)
+
 
 def main():
     """Main entry point for the CLI."""
     parser = create_parser()
     args = parser.parse_args()
 
-    # Parse months
-    months = [int(m.strip()) for m in args.months.split(",")]
-
-    # Create configuration
+    src = get_source(args.sources_json, args.source)
     config = PreprocessingConfig(
+        source_id=src.id,
+        sources_json=args.sources_json,
         data_path=args.data_path,
-        year=args.year,
-        months=months,
-        cell_size=args.cell_size,
-        #remove [ parentheses ] then split by comma
-        bbox = tuple(float(coord) for coord in args.bbox.strip("[]").split(",")) if args.bbox else None,
+        cell_size=src.cell_size,
     )
 
     # Handle plot mode (skips preprocessing)
@@ -287,11 +282,12 @@ def main():
         steps = [s for s in steps if s not in skip_steps]
 
     print(f"BSS Preprocessing Pipeline")
+    print(f"Source: {src.id}")
     print(f"Data path: {config.data_path}")
-    print(f"Year: {config.year}, Months: {config.months}")
+    print(f"Years: {src.years}, Months: {src.months}")
     print(f"Steps to run: {', '.join(steps)}")
 
-    run_pipeline(config, steps, verbose=args.verbose)
+    run_pipeline(config, src, steps, verbose=args.verbose)
 
 
 if __name__ == "__main__":

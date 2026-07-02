@@ -4,7 +4,6 @@ Download trip data from BlueBikes.
 This module downloads and extracts the BlueBikes trip data for the specified year.
 """
 
-import argparse
 import os
 import shutil
 import zipfile
@@ -13,110 +12,108 @@ from urllib.parse import urlparse
 import requests
 from tqdm import tqdm
 
-from preprocessing.config import PreprocessingConfig, DEFAULT_CONFIG
+from preprocessing.config import PreprocessingConfig
+from preprocessing.core.sources import Source
+from preprocessing.core.converter import TripDataConverter
 
 
-def download_and_extract(url: str, target_directory: str, tbar: tqdm = None) -> None:
+def download_file(url: str, target_directory: str, tbar: tqdm = None) -> str | None:
     """
-    Download a file from the given URL and extract if it's a ZIP file.
+    Download a single file. Does NOT extract — that's a separate phase now,
+    on purpose, so a mid-batch network failure doesn't leave you standing
+    in a half-extracted crime scene.
 
-    Parameters:
-        url: The URL to download the file from.
-        target_directory: The directory where the file will be saved and extracted.
-        tbar: Optional tqdm progress bar for status updates.
+    Returns the saved path, or None if the download failed (already logged).
     """
+    os.makedirs(target_directory, exist_ok=True)
+    filename = os.path.basename(urlparse(url).path)
+    save_path = os.path.join(target_directory, filename)
+
+    if tbar is not None:
+        tbar.set_description(f"Downloading {filename}")
+    else:
+        print(f"Downloading file from {url}...")
+
     try:
-        os.makedirs(target_directory, exist_ok=True)
-
-        filename = os.path.basename(urlparse(url).path)
-        save_path = os.path.join(target_directory, filename)
-
-        if tbar is not None:
-            tbar.set_description(f"Downloading {filename}")
-        else:
-            print(f"Downloading file from {url}...")
-
         response = requests.get(url, stream=True)
         response.raise_for_status()
-
         with open(save_path, "wb") as file:
             for chunk in response.iter_content(chunk_size=8192):
                 file.write(chunk)
-
-        if zipfile.is_zipfile(save_path):
-            if tbar is not None:
-                tbar.set_description(f"Extracting {filename}")
-            else:
-                print(f"Extracting contents of {save_path}...")
-
-            with zipfile.ZipFile(save_path, "r") as zip_ref:
-                zip_ref.extractall(target_directory)
-
-            os.remove(save_path)
-            if tbar is not None:
-                tbar.set_description(f"Removed ZIP: {filename}")
-            else:
-                print(f"Removed the ZIP file: {save_path}")
-        else:
-            print(f"The file is not a ZIP archive. No extraction performed.")
-
+        return save_path
     except requests.exceptions.RequestException as e:
-        print(f"Error downloading the file: {e}")
+        print(f"Error downloading {url}: {e}")
+        return None
+
+
+def extract_zip(zip_path: str, target_directory: str, tbar: tqdm = None) -> bool:
+    """
+    Extract a single zip in place. Zip is kept — nobody deletes it, we
+    learned that lesson already. Returns True on success.
+    """
+    filename = os.path.basename(zip_path)
+
+    if not zipfile.is_zipfile(zip_path):
+        print(f"{filename} is not a valid ZIP archive. Skipping extraction — "
+              f"either the download is corrupt or the provider handed you garbage.")
+        return False
+
+    if tbar is not None:
+        tbar.set_description(f"Extracting {filename}")
+    else:
+        print(f"Extracting {zip_path}...")
+
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zip_ref:
+            zip_ref.extractall(target_directory)
+        return True
     except zipfile.BadZipFile as e:
-        print(f"Error extracting ZIP file: {e}")
-    except Exception as e:
-        print(f"An error occurred: {e}")
+        print(f"Corrupt zip, extraction failed for {filename}: {e}")
+        return False
 
 
-def run(config: PreprocessingConfig) -> None:
-    """
-    Run the download trips step.
-
-    Parameters:
-        config: The preprocessing configuration.
-    """
+def run(config: PreprocessingConfig, source: Source) -> None:
     save_path = config.trips_path
     os.makedirs(save_path, exist_ok=True)
-    print(f"Saving trip data to: {save_path}")
 
-    tbar = tqdm(config.months, desc="Downloading files", position=0, leave=True)
+    all_month_pairs = [(year, month) for year in source.years for month in source.months]
 
-    for month in config.months:
-        filename = f"{config.year}{str(month).zfill(2)}-bluebikes-tripdata.csv"
-        if not os.path.exists(os.path.join(save_path, filename)):
-            url = f"https://s3.amazonaws.com/hubway-data/{config.year}{str(month).zfill(2)}-bluebikes-tripdata.zip"
-            download_and_extract(url, save_path, tbar)
+    # ── Phase 1: download every zip first. All of them. No extraction yet. ──
+    zip_paths = []
+    tbar = tqdm(all_month_pairs, desc="Downloading files", position=0, leave=True)
+    for year, month in all_month_pairs:
+        filename = source.zip_filename(year, month)
+        zip_path = os.path.join(save_path, filename)
+        if os.path.exists(zip_path):
+            tbar.set_description(f"Already have {filename}, skipping")
         else:
-            tbar.set_description(f"Skipping {filename} (exists)")
+            downloaded = download_file(source.url_for(year, month), save_path, tbar)
+            if downloaded is None:
+                # Don't silently swallow a failed month — you'd rather find
+                # out now than three steps deeper when preprocess_data.py
+                # quietly loads incomplete data and gives you numbers that
+                # look plausible but are wrong. Wrong-but-plausible is the
+                # worst kind of bug.
+                raise RuntimeError(
+                    f"Failed to download {filename} for source '{source.id}'. "
+                    f"Aborting before touching anything already on disk."
+                )
+        zip_paths.append(zip_path)
         tbar.update(1)
+    tbar.close()
 
-    # Clean up macOS artifacts
+    # ── Phase 2: extract everything, now that we know every zip landed. ──
+    ebar = tqdm(zip_paths, desc="Extracting files", position=0, leave=True)
+    for zip_path in zip_paths:
+        extract_zip(zip_path, save_path, ebar)
+        ebar.update(1)
+    ebar.close()
+
     macosx_path = os.path.join(save_path, "__MACOSX")
     if os.path.exists(macosx_path):
         shutil.rmtree(macosx_path)
 
-
-def main():
-    """CLI entry point for download_trips."""
-    parser = argparse.ArgumentParser(description="Download the BlueBikes trip data.")
-    parser.add_argument(
-        "--data-path",
-        type=str,
-        default=DEFAULT_CONFIG.data_path,
-        help="The directory where the data will be saved.",
-    )
-    parser.add_argument(
-        "--year",
-        type=int,
-        default=DEFAULT_CONFIG.year,
-        help="Year of data to download.",
-    )
-
-    args = parser.parse_args()
-
-    config = PreprocessingConfig(data_path=args.data_path, year=args.year)
-    run(config)
-
-
-if __name__ == "__main__":
-    main()
+    # ── Phase 3: hand off to the converter. One merged CSV, raw CSVs purged. ──
+    output_csv = os.path.join(save_path, f"{source.id}-{source.month_str}-tripdata.csv")
+    converter = TripDataConverter(source)
+    converter.convert(trips_dir=save_path, output_file=output_csv, cleanup=True)

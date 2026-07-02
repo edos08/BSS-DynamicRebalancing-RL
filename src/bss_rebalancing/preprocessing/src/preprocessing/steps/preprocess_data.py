@@ -21,6 +21,7 @@ from typing import List
 
 from preprocessing.config import DEFAULT_CONFIG, PreprocessingConfig
 from preprocessing.core.graph import initialize_graph
+from preprocessing.core.sources import Source, get_source
 
 
 def filter_and_map_stations(
@@ -323,43 +324,47 @@ def build_rate_matrix(
     return rate_matrix
 
 
-def run(config: PreprocessingConfig) -> None:
+def run(config: PreprocessingConfig, source: Source) -> None:
     """
     Run the preprocessing pipeline: filter stations, compute rates, save matrices.
 
     Parameters:
         config: Preprocessing configuration object
+        source: Data source definition (graph place, bbox, years/months, station id scheme)
     """
     os.makedirs(config.utils_path, exist_ok=True)
 
     print("Initializing the graph...")
     graph = initialize_graph(
-        places=config.place,
-        network_type=config.network_type,
+        places=[source.graph_place],   # was config.place — dead field, and note the list wrap:
+        network_type=source.network_type,  # initialize_graph wants list[str], graph_place is a single str
         graph_path=config.graph_path,
         remove_isolated_nodes=True,
         simplify_network=True,
         nodes_to_remove=config.nodes_to_remove,
-        bbox=config.bbox,
+        bbox=source.bbox,              # was config.bbox — dead field
     )
 
-    print(f"\nLoading trip data for year {config.year}, months {config.months}...")
+    print(f"\nLoading trip data for source '{source.id}', years {source.years}, months {source.months}...")
 
-    # Load trip data
-    trip_df = pl.DataFrame()
-    for month in config.months:
-        path = os.path.join(
-            config.trips_path,
-            f"{config.year}{str(month).zfill(2)}-bluebikes-tripdata.csv"
-        )
-        if os.path.isfile(path):
-            monthly_data = pl.read_csv(path)
-            trip_df = pl.concat([trip_df, monthly_data]) if trip_df.height > 0 else monthly_data
-        else:
-            print(f"Warning: Trip data for month {month} not found. Skipping...")
+    # The converter already merged every month into one file during the
+    # download step — read that directly instead of re-deriving a filename
+    # pattern here (that's exactly the kind of duplication that drifted out
+    # of sync last time and silently loaded nothing for months).
+    trip_data_path = os.path.join(
+        config.trips_path,
+        f"{source.id}-{source.month_str}-tripdata.csv"
+    )
+
+    if not os.path.isfile(trip_data_path):
+        print(f"Trip data not found at {trip_data_path}. "
+              f"Did the 'download' step run for this source? Exiting.")
+        return
+
+    trip_df = pl.read_csv(trip_data_path)
 
     if trip_df.height == 0:
-        print("No trip data found. Exiting.")
+        print("Trip data file is empty. Exiting.")
         return
 
     # Map stations to graph nodes
@@ -367,7 +372,7 @@ def run(config: PreprocessingConfig) -> None:
     mapped_stations, stations_dict = filter_and_map_stations(
         trip_df,
         graph,
-        bbox=config.bbox,
+        bbox=source.bbox,
         max_distance_meters=100.0
     )
 
@@ -429,7 +434,7 @@ def run(config: PreprocessingConfig) -> None:
             matrix_path = os.path.join(
                 config.data_path,
                 "matrices",
-                config.month_str,
+                source.month_str,
                 day_name
             )
             os.makedirs(matrix_path, exist_ok=True)
@@ -446,7 +451,7 @@ def run(config: PreprocessingConfig) -> None:
             rates_path = os.path.join(
                 config.data_path,
                 "rates",
-                config.month_str,
+                source.month_str,
                 day_name
             )
             os.makedirs(rates_path, exist_ok=True)
@@ -479,28 +484,28 @@ def main():
         help="Path to data directory"
     )
     parser.add_argument(
-        "--year",
-        type=int,
-        default=DEFAULT_CONFIG.year,
-        help="Year of data to process"
+        "--source",
+        type=str,
+        required=True,
+        help="Source id from sources.json (e.g. 'bluebikes', 'citibike')"
     )
     parser.add_argument(
-        "--months",
+        "--sources-json",
         type=str,
-        default="9",
-        help="Comma-separated months to process"
+        default="core/sources.json"
     )
 
     args = parser.parse_args()
-    months = [int(m.strip()) for m in args.months.split(",")]
 
+    src = get_source(args.sources_json, args.source)
     config = PreprocessingConfig(
+        source_id=src.id,
+        sources_json=args.sources_json,
         data_path=args.data_path,
-        year=args.year,
-        months=months
+        cell_size=src.cell_size,
     )
-    
-    run(config)
+
+    run(config, src)
 
 
 if __name__ == "__main__":

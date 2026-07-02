@@ -13,11 +13,12 @@ import osmnx as ox
 from tqdm import tqdm
 
 from preprocessing.config import DEFAULT_CONFIG, PreprocessingConfig
+from preprocessing.core.sources import Source, get_source
 from preprocessing.core.graph import load_graph
 from preprocessing.core.utils import nodes_within_radius
 
 
-def run(config: PreprocessingConfig) -> None:
+def run(config: PreprocessingConfig, source: Source) -> None:
     """
     Run the nodes dictionary preprocessing step.
 
@@ -49,15 +50,22 @@ def run(config: PreprocessingConfig) -> None:
 
 
 def main():
-    """CLI entry point for preprocess_nodes_dictionary."""
     parser = argparse.ArgumentParser(description="Preprocess the nodes dictionary.")
     parser.add_argument("--data-path", type=str, default=DEFAULT_CONFIG.data_path, help="Path to data directory.")
+    parser.add_argument("--source", type=str, required=True, help="Source id from sources.json.")
+    parser.add_argument("--sources-json", type=str, default="core/sources.json")
     parser.add_argument("--radius", type=int, default=250, help="Radius in meters for nearby nodes.")
 
     args = parser.parse_args()
 
-    config = PreprocessingConfig(data_path=args.data_path, user_radius=args.radius)
-    run(config)
+    src = get_source(args.sources_json, args.source)
+    config = PreprocessingConfig(
+        source_id=src.id,
+        sources_json=args.sources_json,
+        data_path=args.data_path,
+        user_radius=args.radius,
+    )
+    run(config, src)
 
 
 if __name__ == "__main__":

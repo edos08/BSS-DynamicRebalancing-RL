@@ -24,6 +24,17 @@ from preprocessing.core.grid import (
     assign_nodes_to_cells,
     set_adjacent_cells,
 )
+from preprocessing.core.sources import (
+    get_source,
+    load_sources,
+)
+from preprocessing.core.converter import (
+    TripDataConverter,
+)
+from preprocessing.core.manifest import (
+    build_manifest,
+    write_manifest
+)
 
 __all__ = [
     # Utils
@@ -44,4 +55,12 @@ __all__ = [
     "divide_graph_into_cells",
     "assign_nodes_to_cells",
     "set_adjacent_cells",
+    # Sources
+    "get_source",
+    "load_sources",
+    # Converter
+    "TripDataConverter",
+    # Manifest
+    "build_manifest",
+    "write_manifest",
 ]
