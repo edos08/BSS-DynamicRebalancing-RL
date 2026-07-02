@@ -191,7 +191,7 @@ The environments require preprocessed data in the specified `data_path`:
 ```
 data/
 ├── utils/
-│   ├── cambridge_network.graphml       # OSM street network
+│   ├── network.graphml       # OSM street network
 │   ├── cell_data.pkl                   # Spatial grid cells
 │   ├── distance_matrix.csv             # Station-to-station distances
 │   ├── nearby_nodes.pkl                # Neighborhood lookup

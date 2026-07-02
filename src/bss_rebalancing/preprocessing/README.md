@@ -173,7 +173,7 @@ data/
 │       └── ...
 │
 ├── utils/                                  # Processed utilities
-│   ├── cambridge_network.graphml           # Street network graph
+│   ├── network.graphml           # Street network graph
 │   ├── cell_data.pkl                       # Spatial grid cells
 │   ├── distance_matrix.csv                 # Travel time matrix
 │   ├── ev_consumption_matrix.csv           # Travel time matrix
