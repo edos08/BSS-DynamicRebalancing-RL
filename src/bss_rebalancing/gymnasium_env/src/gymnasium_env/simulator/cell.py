@@ -96,7 +96,7 @@ class Cell:
             self._metrics[key] = 0 if isinstance(self._metrics[key], int) else 0.0
         self._is_critical = False
 
-    # ── Per-step centralised metric update ─────────────────────────────────────
+    # ── Per-step centralized metric update ─────────────────────────────────────
 
     def update_metrics(
         self,

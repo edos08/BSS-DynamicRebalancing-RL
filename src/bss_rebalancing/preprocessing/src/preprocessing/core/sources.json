@@ -1,0 +1,71 @@
+{
+  "sources": {
+    "bluebikes": {
+      "base_url": "https://s3.amazonaws.com/hubway-data/",
+      "url_prefix": "",
+      "url_suffix": "-bluebikes-tripdata.zip",
+      "graph_place": "Cambridge, Massachusetts, USA",
+      "network_type": "bike",
+      "bbox": [42.36889381,42.35248869,-71.07231001,-71.11736849],
+      "years": [2022],
+      "months": [9, 10],
+      "station_id_type": "numeric",
+      "multi_csv_per_zip": false,
+      "column_map": {
+        "starttime": "starttime",
+        "stoptime": "stoptime",
+        "start station id": "start station id",
+        "end station id": "end station id",
+        "start station name": "start station name",
+        "end station name": "end station name",
+        "start station latitude": "start station latitude",
+        "start station longitude": "start station longitude",
+        "end station latitude": "end station latitude",
+        "end station longitude": "end station longitude"
+      },
+      "vital_columns": [
+        "starttime", "stoptime",
+        "start station id", "end station id",
+        "start station name", "end station name",
+        "start station latitude", "start station longitude",
+        "end station latitude", "end station longitude"
+      ],
+      "cell_size": 300
+    },
+    "citibike": {
+      "base_url": "https://s3.amazonaws.com/tripdata/",
+      "url_prefix": "",
+      "url_suffix": "-citibike-tripdata.zip",
+      "graph_place": "Manhattan, New York, USA",
+      "network_type": "bike",
+      "bbox": [40.7620,40.7474,-73.9741,-73.993],
+      "years": [2024],
+      "months": [9, 10],
+      "station_id_type": "alphanumeric",
+      "multi_csv_per_zip": true,
+      "column_map": {
+        "ride_id": "",
+        "rideable_type": "",
+        "started_at": "starttime",
+        "ended_at": "stoptime",
+        "start_station_name": "start station name",
+        "start_station_id": "start station id",
+        "end_station_name": "end station name",
+        "end_station_id": "end station id",
+        "start_lat": "start station latitude",
+        "start_lng": "start station longitude",
+        "end_lat": "end station latitude",
+        "end_lng": "end station longitude",
+        "member_casual": ""
+      },
+      "vital_columns": [
+        "starttime", "stoptime",
+        "start station id", "end station id",
+        "start station name", "end station name",
+        "start station latitude", "start station longitude",
+        "end station latitude", "end station longitude"
+      ],
+      "cell_size": 300
+    }
+  }
+}

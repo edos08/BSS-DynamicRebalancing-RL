@@ -12,6 +12,7 @@ import os
 import pandas as pd
 
 from preprocessing.config import DEFAULT_CONFIG, PreprocessingConfig
+from preprocessing.core.sources import Source, get_source
 
 
 # EV consumption matrix (kWh/km) - varies by traffic conditions
@@ -73,7 +74,7 @@ def create_ev_velocity_matrix() -> pd.DataFrame:
     return pd.DataFrame(EV_VELOCITY_DATA)
 
 
-def run(config: PreprocessingConfig) -> None:
+def run(config: PreprocessingConfig, source: Source) -> None:
     """
     Run the EV matrices creation step.
 
@@ -99,14 +100,16 @@ def run(config: PreprocessingConfig) -> None:
 
 
 def main():
-    """CLI entry point for create_ev_matrices."""
     parser = argparse.ArgumentParser(description="Create static EV consumption and velocity matrices.")
     parser.add_argument("--data-path", type=str, default=DEFAULT_CONFIG.data_path, help="Path to data directory.")
+    parser.add_argument("--source", type=str, required=True, help="Source id from sources.json (unused, kept for CLI symmetry).")
+    parser.add_argument("--sources-json", type=str, default="core/sources.json")
 
     args = parser.parse_args()
 
-    config = PreprocessingConfig(data_path=args.data_path)
-    run(config)
+    src = get_source(args.sources_json, args.source)
+    config = PreprocessingConfig(source_id=src.id, sources_json=args.sources_json, data_path=args.data_path)
+    run(config, src)
 
 
 if __name__ == "__main__":

@@ -398,7 +398,7 @@ def load_base_graph(data_path: Path) -> Optional[nx.MultiDiGraph]:
     Returns:
         NetworkX MultiDiGraph or None if not found
     """
-    graph_path = data_path / 'utils' / 'cambridge_network.graphml'
+    graph_path = data_path / 'utils' / 'network.graphml'
     if not graph_path.exists():
         return None
     return ox.load_graphml(graph_path)

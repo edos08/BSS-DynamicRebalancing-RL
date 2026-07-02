@@ -180,15 +180,23 @@ class EnvLogger:
     ) -> None:
         if not self.can_log(logging.WARNING):
             return
+        # End station cell
         end_cell = (
             end_station.get_cell().get_id()
-            if end_station.get_station_id() != 10000
+            if end_station.get_station_id() != 10000 and end_station.get_cell() is not None
+            else "-"
+        )
+
+        # Start station cell (same sentinel logic)
+        start_cell = (
+            start_station.get_cell().get_id()
+            if start_station.get_station_id() != 10000 and start_station.get_cell() is not None
             else "-"
         )
         self._logger.warning(
             self._prefix(
                 f"TRIP FAILED: No bikes from station {start_station.get_station_id()}"
-                f" (cell: {start_station.get_cell().get_id()})"
+                f" (cell: {start_cell})"
                 f" to station {end_station.get_station_id()}"
                 f" (cell: {end_cell})"
             )

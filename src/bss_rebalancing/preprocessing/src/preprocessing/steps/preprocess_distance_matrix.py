@@ -13,6 +13,7 @@ import osmnx as ox
 import polars as pl
 
 from preprocessing.config import DEFAULT_CONFIG, PreprocessingConfig
+from preprocessing.core.sources import Source, get_source
 from preprocessing.core.graph import load_graph
 from preprocessing.core.utils import reorder_df
 
@@ -49,7 +50,7 @@ def initialize_distance_matrix(graph: nx.MultiDiGraph) -> pl.DataFrame:
     return df
 
 
-def run(config: PreprocessingConfig) -> None:
+def run(config: PreprocessingConfig, source: Source) -> None:
     """
     Run the distance matrix preprocessing step.
 
@@ -72,14 +73,16 @@ def run(config: PreprocessingConfig) -> None:
 
 
 def main():
-    """CLI entry point for preprocess_distance_matrix."""
     parser = argparse.ArgumentParser(description="Preprocess the distance matrix.")
     parser.add_argument("--data-path", type=str, default=DEFAULT_CONFIG.data_path, help="Path to data directory.")
+    parser.add_argument("--source", type=str, required=True, help="Source id from sources.json.")
+    parser.add_argument("--sources-json", type=str, default="core/sources.json")
 
     args = parser.parse_args()
 
-    config = PreprocessingConfig(data_path=args.data_path)
-    run(config)
+    src = get_source(args.sources_json, args.source)
+    config = PreprocessingConfig(source_id=src.id, sources_json=args.sources_json, data_path=args.data_path)
+    run(config, src)
 
 
 if __name__ == "__main__":

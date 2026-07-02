@@ -60,6 +60,7 @@ def initialize_graph(
             bbox_v2 = (west, south, east, north)
             print(f"Truncating graph to bounding box: {bbox_v2}")
             graph = ox.truncate.truncate_graph_bbox(G=graph, bbox=bbox_v2)
+            graph = ox.truncate.largest_component(graph, strongly=False)
 
         graph = ox.add_edge_speeds(graph)
         graph = ox.add_edge_travel_times(graph)
@@ -81,7 +82,18 @@ def initialize_graph(
 
         # Remove isolated nodes
         if remove_isolated_nodes:
+            # Remove true isolates (degree 0) first
             graph.remove_nodes_from(list(nx.isolates(graph)))
+
+            # Remove small disconnected fragments (e.g. single "solitary" nodes
+            # left dangling after bbox truncation)
+            if graph.number_of_nodes() > 0:
+                components = list(nx.weakly_connected_components(graph))
+                largest_component = max(components, key=len)
+                nodes_to_drop = set(graph.nodes()) - largest_component
+                if nodes_to_drop:
+                    print(f"Removing {len(nodes_to_drop)} node(s) outside the main connected component...")
+                    graph.remove_nodes_from(nodes_to_drop)
 
         # Remove specified nodes
         if nodes_to_remove is not None and len(nodes_to_remove) > 0:

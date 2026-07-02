@@ -29,7 +29,7 @@ benchmarks/results_*/
 data_new/
 /simulator/
 gymnasium_env.egg-info/
-results
+results*
 /results/
 DuelingDQN.py
 /benchmarks/csv_converter.py
