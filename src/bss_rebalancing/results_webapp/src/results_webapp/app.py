@@ -157,7 +157,7 @@ def create_app(results_path: str, data_path: str = None, port: int = 8050,
 
     Args:
         results_path: Path to results directory
-        data_path: Path to data directory containing cambridge_network.graphml
+        data_path: Path to data directory containing network.graphml
         port: Port to run server on
         update_interval_ms: Auto-refresh interval in milliseconds
 
@@ -216,7 +216,7 @@ def main():
     parser.add_argument('--results-path', type=str, default='../results',
                         help='Path to results directory')
     parser.add_argument('--data-path', type=str, default=None,
-                        help='Path to data directory (containing utils/cambridge_network.graphml)')
+                        help='Path to data directory (containing utils/network.graphml)')
     parser.add_argument('--port', type=int, default=8050,
                         help='Port to run server on')
     parser.add_argument('--update-interval', type=int, default=5*60*1000,
