@@ -30,6 +30,9 @@ bss-benchmark = "benchmark.run:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.yml", "*.yaml"]
+
 [tool.black]
 line-length = 88
 

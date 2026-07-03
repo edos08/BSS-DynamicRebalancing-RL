@@ -70,3 +70,6 @@ Issues = "https://github.com/edos08/BSS-DynamicRebalancing-RL/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.yml", "*.yaml"]
