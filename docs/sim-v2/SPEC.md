@@ -56,7 +56,7 @@ frozen so that the thesis results remain reproducible.
 | D17 | Walking model defaults β = 150 m, radius 400 m, 1.4 m/s. |
 | D18 | Trips with one end outside Cambridge use the **external reservoir** (§6.5). |
 | D19 | Depot near **First Street × Cambridge Street** (East Cambridge); default fleet size from the operator's live feed (§7.2). |
-| D20 | Trucks are **electric vans** that **swap e-bike batteries on the street**; the battery stock is limited, and an empty stock sends the truck to the depot, after which it **resumes** the interrupted command (§9.1). |
+| D20 | Trucks are **electric vans** that **swap e-bike batteries on the street**; the battery stock is limited, and an empty stock sends the truck to the depot, after which it **resumes** the interrupted command (§9.1). The van itself is assumed **always charged**: energy is reported, not constrained. |
 
 ---
 
@@ -397,9 +397,13 @@ Hours are grouped into a few traffic regimes so that time matrices stay small (o
 function of speed (constant-speed consumption curve, as used by TomTom's EV routing), stops and
 load. The default preset `e_transit` follows a Ford E-Transit cargo van (≈ 68 kWh usable battery,
 ≈ 0.3–0.4 kWh/km in urban driving); the exact curve and figures are fixed and sourced in #28.
-The van battery is a resource like the battery stock: when it would drop below a reserve, the
-same depot rule as §9.1 applies, and the depot visit recharges it (charging time from the
-charger power).
+
+The van battery is **not a constraint**: vans are assumed always charged, because a van running
+low is swapped for a charged one at its next depot visit. This is negligible in practice: a shift
+in Cambridge (≈ 18 km²) drives on the order of 60–120 km, i.e. roughly 20–50 kWh, below the usable
+capacity. Energy is a **KPI**: kWh per truck and per shift (and derived cost/emissions) are
+reported, and a run is flagged if a truck's kWh between two depot visits exceeds the usable
+capacity, so the assumption is checked rather than trusted.
 
 ### 9.1 Depot returns and resuming
 
@@ -407,8 +411,7 @@ Battery swaps happen **on the street**: `SwapBattery(n)` replaces the batteries 
 e-bikes at the stop, using charged batteries from the truck's stock. The stock is limited
 (`battery_stock.max`); used batteries stay on the truck until the depot.
 
-When the stock is empty (or the van battery reaches its reserve) and the current or next command
-needs it:
+When the stock is empty and the current or next command needs it:
 
 - `on_empty: resume` (**default**): the truck finishes the service in progress with what it has,
   then inserts `ToDepot()` + `Restock()` at the head of its queue, drives to the depot, swaps
@@ -533,7 +536,7 @@ Answers to the review questions (2026-11-25), recorded as D15–D20 in §2.
 | 5 | External trips | External reservoir (§6.5). |
 | 6 | Depot and fleet | Depot at First St × Cambridge St; fleet 800 by default (GBFS, §7.2), tuned in M7. |
 | 7 | Battery swaps | On the street, limited stock, depot return then resume (§9.1). |
-| 8 | Truck vehicle | Electric van, `e_transit` preset (§9). |
+| 8 | Truck vehicle | Electric van, `e_transit` preset (§9); always charged, energy reported as a KPI (#50). |
 
 Still open (not blocking M1): TomTom data access (Traffic Stats trial vs Routing API with
 historical traffic, #17).
