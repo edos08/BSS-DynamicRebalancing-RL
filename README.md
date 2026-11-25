@@ -112,7 +112,17 @@ bss-rebalancing/
    pip install -e .
    ```
 
-   This single command installs all five packages and their CLI tools in development mode.
+   This single command installs all the packages and their CLI tools in development mode.
+
+   **PyTorch and GPUs.** `rl_training` requires `torch>=2.13,<2.16` and `torch-geometric>=2.8,<2.9`
+   (tested with torch 2.15.0 and PyG 2.8.1). The default Linux wheel of torch 2.15 is built for
+   CUDA 13.2 and runs on NVIDIA drivers >= 580 (tested on RTX A6000, driver 580.178). For an older
+   driver, install a matching build first, e.g. CUDA 12.6:
+   ```bash
+   pip install --index-url https://download.pytorch.org/whl/cu126 torch==2.14.1
+   ```
+   CPU only: `pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0`.
+   Checkpoints saved with older torch versions (2.4.1) still load.
 
 4. **Verify installation**:
    ```bash
