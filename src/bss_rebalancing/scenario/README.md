@@ -52,6 +52,21 @@ Rows are **flagged, never deleted** (except trips not touching the city with the
 Python: `bss_scenario.trips.read_trips(paths, valid_only=False)` reads and checks the tables
 (`TRIPS_SCHEMA`, `TRIPS_SCHEMA_VERSION`).
 
+### `bss-scenario traffic`: truck travel-time data
+
+```bash
+bss-scenario traffic sample  --graph data/raw/osm/cambridge_drive.graphml --out data/raw/traffic/od_sample.parquet
+export TOMTOM_API_KEY=...   # never commit it
+bss-scenario traffic collect --od data/raw/traffic/od_sample.parquet --cache data/raw/traffic/tomtom --daily
+bss-scenario traffic status  --od data/raw/traffic/od_sample.parquet --cache data/raw/traffic/tomtom
+```
+
+`sample` draws OD pairs stratified by distance band and area. `collect` asks the TomTom Routing
+API for the no-traffic and historic-traffic travel time of every pair at every hour of a
+reference weekday, Saturday and Sunday (`plan.json` in the cache fixes the dates). Responses are
+cached as JSON (never the key); reruns only query what is missing; `--daily` runs one batch of
+`--max-requests` (2,400, under the free 2,500/day) per day until done.
+
 ## Status
 
 Milestone M1 (epic #38). Commands are added as they are implemented.

@@ -42,7 +42,59 @@ def build_parser() -> argparse.ArgumentParser:
     sample.add_argument("--n-pairs", type=int, default=200)
     sample.add_argument("--seed", type=int, default=20241)
     sample.set_defaults(func=_cmd_traffic_sample)
+
+    collect = traffic_sub.add_parser(
+        "collect", help="query the TomTom Routing API for every OD pair x day type x hour (resumable)",
+        description="Requires TOMTOM_API_KEY. Responses are cached; reruns only query what is missing.")
+    collect.add_argument("--od", required=True, type=Path, help="OD sample Parquet (traffic sample)")
+    collect.add_argument("--cache", required=True, type=Path, help="cache directory, e.g. data/raw/traffic/tomtom")
+    collect.add_argument("--max-requests", type=int, default=2400, help="per run / per day (free tier: 2,500/day)")
+    collect.add_argument("--max-qps", type=float, default=2.0)
+    collect.add_argument("--daily", action="store_true",
+                         help="keep running: one batch per day until everything is cached")
+    collect.set_defaults(func=_cmd_traffic_collect)
+
+    st = traffic_sub.add_parser("status", help="show how much of the collection is cached")
+    st.add_argument("--od", required=True, type=Path)
+    st.add_argument("--cache", required=True, type=Path)
+    st.set_defaults(func=_cmd_traffic_status)
     return parser
+
+
+def _cmd_traffic_collect(args: argparse.Namespace) -> int:
+    import datetime as dt
+    import json
+    import time
+
+    import polars as pl
+
+    from bss_scenario.traffic import tomtom
+
+    od = pl.read_parquet(args.od)
+    fetch = tomtom.urllib_fetch(tomtom.api_key_from_env())
+    while True:
+        started = time.time()
+        result = tomtom.collect(od, args.cache, fetch, max_requests=args.max_requests, max_qps=args.max_qps)
+        stamp = dt.datetime.now().isoformat(timespec="seconds")
+        print(f"[{stamp}] {json.dumps(result.as_dict())}", flush=True)
+        if result.stopped == "done" and result.remaining == 0:
+            return 0
+        if result.stopped == "too_many_errors":
+            return 1
+        if not args.daily:
+            return 0
+        time.sleep(max(0.0, 24 * 3600 + 300 - (time.time() - started)))
+
+
+def _cmd_traffic_status(args: argparse.Namespace) -> int:
+    import json
+
+    import polars as pl
+
+    from bss_scenario.traffic import tomtom
+
+    print(json.dumps(tomtom.status(pl.read_parquet(args.od), args.cache), indent=2))
+    return 0
 
 
 def _cmd_traffic_sample(args: argparse.Namespace) -> int:
