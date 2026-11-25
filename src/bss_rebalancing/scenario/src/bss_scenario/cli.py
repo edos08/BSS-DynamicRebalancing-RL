@@ -42,6 +42,15 @@ def build_parser() -> argparse.ArgumentParser:
                           help="metres; walking neighbours are stored up to this radius")
     networks.set_defaults(func=_cmd_networks)
 
+    st_ = sub.add_parser("stations", help="build the stations table (capacity from GBFS, nearest bike node)")
+    st_.add_argument("--trips", required=True, type=Path, help="directory with cleaned trips YYYY-MM.parquet")
+    st_.add_argument("--boundary", required=True, type=Path, help="city boundary GeoJSON")
+    st_.add_argument("--gbfs", required=True, type=Path,
+                     help="GBFS station_information.json, in a folder named after the snapshot date")
+    st_.add_argument("--network", required=True, type=Path, help="network directory (bss-scenario networks)")
+    st_.add_argument("--out", required=True, type=Path, help="output Parquet, e.g. <bundle>/stations/stations.parquet")
+    st_.set_defaults(func=_cmd_stations)
+
     traffic = sub.add_parser("traffic", help="truck travel-time data (OD sample, routing queries, fit)")
     traffic_sub = traffic.add_subparsers(dest="traffic_command", metavar="<step>", required=True)
     sample = traffic_sub.add_parser("sample", help="draw the stratified OD sample for routing queries")
@@ -112,6 +121,23 @@ def _cmd_networks(args: argparse.Namespace) -> int:
 
     report = build_networks(args.bike, args.drive, args.out, args.walk_radius_max)
     print(json.dumps({k: report[k] for k in ("bike", "drive", "timings_s", "files_mb")}, indent=2))
+    return 0
+
+
+def _cmd_stations(args: argparse.Namespace) -> int:
+    import json
+
+    from bss_scenario.network import Projection
+    from bss_scenario.stations import build_stations, stations_report
+
+    net_report = json.loads((args.network / "network_report.json").read_text())
+    stations = build_stations(sorted(args.trips.glob("*.parquet")), args.boundary, args.gbfs,
+                              args.network / "bike_nodes.parquet", Projection(**net_report["projection"]))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    stations.write_parquet(args.out)
+    report = stations_report(stations)
+    (args.out.parent / "stations_report.json").write_text(json.dumps(report, indent=2) + "\n")
+    print(json.dumps(report, indent=2))
     return 0
 
 
