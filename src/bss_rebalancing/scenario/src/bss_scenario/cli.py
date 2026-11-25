@@ -33,7 +33,27 @@ def build_parser() -> argparse.ArgumentParser:
     trips.add_argument("--keep", choices=["touching_city", "all"], default="touching_city",
                        help="keep only trips with at least one end in the city (default) or all")
     trips.set_defaults(func=_cmd_trips)
+
+    traffic = sub.add_parser("traffic", help="truck travel-time data (OD sample, routing queries, fit)")
+    traffic_sub = traffic.add_subparsers(dest="traffic_command", metavar="<step>", required=True)
+    sample = traffic_sub.add_parser("sample", help="draw the stratified OD sample for routing queries")
+    sample.add_argument("--graph", required=True, type=Path, help="drive network GraphML (OSMnx)")
+    sample.add_argument("--out", required=True, type=Path, help="output Parquet, e.g. data/raw/traffic/od_sample.parquet")
+    sample.add_argument("--n-pairs", type=int, default=200)
+    sample.add_argument("--seed", type=int, default=20241)
+    sample.set_defaults(func=_cmd_traffic_sample)
     return parser
+
+
+def _cmd_traffic_sample(args: argparse.Namespace) -> int:
+    from bss_scenario.traffic import ODSampleConfig, build_od_sample
+    from bss_scenario.traffic.sample import summarise
+
+    config = ODSampleConfig(n_pairs=args.n_pairs, seed=args.seed)
+    sample = build_od_sample(args.graph, args.out, config)
+    print(summarise(sample, config.bands_m))
+    print(f"{sample.height} pairs written to {args.out}")
+    return 0
 
 
 def _expand(paths: Sequence[Path]) -> list[Path]:
