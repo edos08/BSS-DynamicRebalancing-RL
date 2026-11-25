@@ -1,0 +1,41 @@
+name: Bug report
+description: Something behaves incorrectly
+labels: ["type: bug"]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happens
+      description: Observed behaviour, with error messages or wrong numbers.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What should happen
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Command, config, seed, scenario/data version.
+      render: shell
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - scenario (bss_scenario)
+        - sim (bss_sim)
+        - gym (bss_gym)
+        - policies (bss_policies)
+        - legacy (gymnasium_env, rl_training, preprocessing, benchmark, results_webapp)
+        - devops / CI
+    validations:
+      required: true
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Suspected cause, links to code (`path:line`), related issues.
