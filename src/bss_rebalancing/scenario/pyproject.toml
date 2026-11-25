@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bss-scenario"
+version = "0.1.0"
+description = "Build scenario bundles (trips, networks, demand) for the BSS simulator v2"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "Edoardo Scarpel", email = "edoardo.scarpel@phd.unipd.it"}
+]
+dependencies = [
+    "numpy>=2.0",
+    "polars>=1.0",
+    "shapely>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+bss-scenario = "bss_scenario.cli:main"
+
+[project.urls]
+Repository = "https://github.com/edos08/BSS-DynamicRebalancing-RL"
+Specification = "https://github.com/edos08/BSS-DynamicRebalancing-RL/blob/dev/docs/sim-v2/SPEC.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bss_scenario = ["py.typed"]

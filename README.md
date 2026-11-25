@@ -77,6 +77,11 @@ bss-rebalancing/
                 ├── callbacks.py       # Interactive callbacks
                 ├── data_loader.py     # Results data loader
                 └── plotting.py        # Plotting utilities
+
+        scenario/                      # Simulator v2: scenario bundle builder (in progress)
+            ├── README.md
+            ├── pyproject.toml
+            └── src/bss_scenario/      # bss-scenario CLI
 ```
 
 ---
@@ -293,6 +298,12 @@ Baseline comparison tools for evaluating RL performance.
 Interactive Dash web application for training visualization.
 - **CLI**: `bss-results-webapp`
 - **Features**: Real-time monitoring, episode analysis, spatial visualization
+
+### `scenario` (simulator v2, in progress)
+Builds versioned scenario bundles (cleaned trips, networks, demand, truck travel data) for the new
+simulator, as specified in [`docs/sim-v2/SPEC.md`](docs/sim-v2/SPEC.md). Independent of the
+packages above.
+- **CLI**: `bss-scenario`
 
 ---
 
