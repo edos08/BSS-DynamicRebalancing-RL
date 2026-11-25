@@ -387,11 +387,28 @@ Commands (queued per truck, executed in order):
 | `ToDepot()` / `Restock(load=…, batteries=…)` | go to the depot, unload/load bikes and batteries |
 | `Wait(seconds)` | stay idle-but-busy for a duration |
 
-**Travel time** (`TravelModel`, issue #28; data in #17):
-1. free-flow speeds from OSM road attributes;
-2. city-wide congestion factor per weekday-hour (TomTom Traffic Index, Boston);
-3. per-segment historical speeds per weekday-hour (TomTom Traffic Stats), map-matched to OSM drive edges.
-Hours are grouped into a few traffic regimes so that time matrices stay small (one ~16 MB matrix per regime).
+**Travel time** (`TravelModel`, issue #28; data in #17). Pluggable sources, in increasing detail:
+
+1. `FreeFlow`: speeds from OSM road attributes (speed limit / road class), no traffic.
+2. **`SampledCongestion` (default)**: a congestion model fitted on sampled routing queries.
+   - Sample ~200 origin–destination pairs over the drive network, stratified by distance and
+     area so that all road classes and parts of the city are covered.
+   - Query a routing API with historical traffic (TomTom Routing API `departAt`, free tier of
+     2,500 requests/day) for every hour of a typical weekday, Saturday and Sunday
+     (~200 × 24 × 3 ≈ 14k queries, run over several days). Raw responses are cached on disk so the
+     collection is resumable and the fit is reproducible without new queries.
+   - Fit a multiplicative slowdown factor `f(day type, hour, road class)` on top of free-flow
+     edge times (least squares on log travel time ratios, with smoothing across hours).
+   - Hold out 20 % of the pairs to report the error of the fitted model; cross-check a subset
+     against the Google Routes API (traffic-aware, free monthly allowance) as an independent source.
+   - The fitted table (a few hundred numbers) is stored in the scenario bundle with its query
+     dates and source; API keys come from environment variables.
+3. `CityIndex`: one city-wide factor per weekday-hour (TomTom Traffic Index, Boston), as a fallback.
+4. `SegmentSpeeds`: per-segment historical speeds (TomTom Traffic Stats, paid / trial),
+   map-matched to OSM drive edges, if access becomes available.
+
+Hours with similar factors are grouped into a few traffic regimes so that time matrices stay small
+(one ~16 MB matrix per regime).
 
 **Energy** (`VehicleEnergyModel`, issue #28): trucks are **electric vans**. Consumption is a
 function of speed (constant-speed consumption curve, as used by TomTom's EV routing), stops and
@@ -404,6 +421,21 @@ in Cambridge (≈ 18 km²) drives on the order of 60–120 km, i.e. roughly 20�
 capacity. Energy is a **KPI**: kWh per truck and per shift (and derived cost/emissions) are
 reported, and a run is flagged if a truck's kWh between two depot visits exceeds the usable
 capacity, so the assumption is checked rather than trusted.
+
+**Cost and emissions** (KPIs only, for later analyses; they never change the dynamics):
+
+```yaml
+costs:
+  electricity_eur_per_kwh: ...      # energy cost of the vans
+  driver_eur_per_hour: ...          # labour, per truck-hour on shift
+  van_eur_per_km: ...               # maintenance / depreciation
+  battery_swap_eur: ...             # handling cost per swapped battery
+emissions:
+  grid_kgco2e_per_kwh: ...          # electricity carbon intensity (ISO New England average)
+```
+
+Reported per truck, per shift and per run: kWh, km driven, operating cost, kg CO2e, and per
+rebalanced bike / per extra served trip. Default values are chosen and sourced in #28.
 
 ### 9.1 Depot returns and resuming
 
@@ -449,7 +481,9 @@ Partial execution (e.g. fewer bikes available) is reported in the `CommandResult
 
 **Telemetry**: an optional event log (Arrow → Parquet) with trip outcomes (served/failed + reason,
 walk distance, wait), truck operations and periodic snapshots. Disabled → near-zero cost. KPIs are
-always available in memory. The results web app reads the logs.
+always available in memory: service level, failures by reason, walk distances, bikes moved,
+batteries swapped, and per truck km, driving/service/idle time, kWh, operating cost and CO2e (§9).
+The results web app reads the logs.
 
 **Validation plan**
 
