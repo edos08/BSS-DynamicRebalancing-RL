@@ -68,6 +68,17 @@ Rows are **flagged, never deleted** (except trips not touching the city with the
 Python: `bss_scenario.trips.read_trips(paths, valid_only=False)` reads and checks the tables
 (`TRIPS_SCHEMA`, `TRIPS_SCHEMA_VERSION`).
 
+### `bss-scenario demand`: demand model
+
+```bash
+bss-scenario demand data/scenarios/cambridge-2024     # (re)fit demand/ in an existing bundle
+```
+
+Part of `build`. Maps trip ends to places (in-city stations + `EXTERNAL`), fits the daily volume
+(month × day group × log-normal noise), and selects the day grouping and smoothing strengths of
+the hourly OD shape on held-out days, then writes `demand/` (places, volume, `shape.npz`, report
+with the full selection table). Cambridge 2024: `day_types`, alpha 1024, beta 512.
+
 ### `bss-scenario networks` and `bss-scenario stations`
 
 ```bash

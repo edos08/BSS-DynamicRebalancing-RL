@@ -4,7 +4,7 @@ Daily totals are modelled as::
 
     count(date) = base × month_factor(month) × group_level(group(date)) × day_noise(date)
 
-fitted by least squares on log counts over every calendar day of the data year (month and group
+fitted by least squares on ``log(1 + count)`` over every calendar day of the data year (month and group
 dummies). ``day_noise`` is log-normal with mean 1: ``log ε ~ N(-σ²/2, σ²)``, σ from the residuals of
 the fit-period days.
 
@@ -53,16 +53,17 @@ def fit_volume(daily: pl.DataFrame, scheme: str, fit_period: tuple[dt.date, dt.d
     months = [d.strftime("%Y-%m") for d in dates]
     month_labels = sorted(set(months))
     count = daily["count"].to_numpy().astype(float)
-    if (count <= 0).any():
-        raise ValueError("days with zero trips: cannot fit a log-linear volume model")
+    # log(1 + count): identical to log(count) at thousands of trips per day, and defined for
+    # empty days (data gaps, tiny test bundles)
+    y = np.log1p(count)
 
     m_idx = np.array([month_labels.index(m) for m in months])
     X = np.zeros((len(dates), len(month_labels) + len(labels) - 1))
     X[np.arange(len(dates)), m_idx] = 1.0                       # month dummies (absorb intercept)
     for g in range(1, len(labels)):                             # group dummies, first group = reference
         X[groups == g, len(month_labels) + g - 1] = 1.0
-    coef, *_ = np.linalg.lstsq(X, np.log(count), rcond=None)
-    resid = np.log(count) - X @ coef
+    coef, *_ = np.linalg.lstsq(X, y, rcond=None)
+    resid = y - X @ coef
     in_fit = np.array([fit_period[0] <= d <= fit_period[1] for d in dates])
     if not in_fit.any():
         raise ValueError(f"no days in the fit period {fit_period}")

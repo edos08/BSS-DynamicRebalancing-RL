@@ -60,8 +60,10 @@ def test_daily_counts_fills_missing_days():
                                          dt.datetime(2024, 7, 3, 9)]})
     d = daily_counts(trips, dt.date(2024, 7, 1), dt.date(2024, 7, 3))
     assert d["count"].to_list() == [2, 0, 1]
-    with pytest.raises(ValueError, match="zero trips"):
-        fit_volume(d, "day_types", (dt.date(2024, 7, 1), dt.date(2024, 7, 3)))
+    vm = fit_volume(d, "day_types", (dt.date(2024, 7, 1), dt.date(2024, 7, 3)))  # empty days are fine
+    assert vm.month_factor["2024-07"] == pytest.approx(1.0)
+    with pytest.raises(ValueError, match="no days in the fit period"):
+        fit_volume(d, "day_types", (dt.date(2025, 1, 1), dt.date(2025, 1, 2)))
 
 
 def test_assign_places():

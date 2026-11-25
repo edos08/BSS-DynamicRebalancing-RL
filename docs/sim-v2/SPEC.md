@@ -215,6 +215,13 @@ Default estimator `PooledShapeEstimator`:
    (Mon–Thu, Fri, Sat, Sun); `workday_weekend` = 2. More groups capture more detail but each has
    less data. The default is chosen in M2 by held-out log-likelihood on Apr–Nov 2024 (#18).
 
+**Selection result (Cambridge, Apr–Nov 2024, #80).** 20 % of days held out (stratified by weekday);
+score = mean conditional log-likelihood per held-out trip of (hour, origin, destination) given the
+day's total. Best: `day_types`, alpha = 1024, beta = 512 (−9.7405 per trip); `workday_weekend`
+−0.0014 and `per_weekday` −0.0092 behind. Without smoothing the best scheme loses 0.98 per trip
+and gives zero probability to 24,511 held-out trips: smoothing matters far more than the grouping.
+Holidays are put in the Sunday group.
+
 Later estimators (same interface): censoring-corrected demand (trips lost at empty stations),
 weather-conditioned volume.
 
