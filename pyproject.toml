@@ -8,7 +8,7 @@ version = "1.1.0"
 description = "Fully Dynamic Rebalancing of Dockless Bike Sharing Systems using Deep Reinforcement Learning"
 readme = "README.md"
 requires-python = ">=3.11"
-license = "CC-BY-NC-4.0"
+license = "MIT"
 authors = [
     {name = "Edoardo Scarpel", email = "edoardo.scarpel@phd.unipd.it"}
 ]
@@ -57,3 +57,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "*" = ["*.yml", "*.yaml", "*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

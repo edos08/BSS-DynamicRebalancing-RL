@@ -29,49 +29,52 @@ pip install .
 
 ```python
 import gymnasium as gym
+import gymnasium_env  # registers the environments
 
-# Create environment
 env = gym.make(
     "gymnasium_env/FullyDynamicEnv-v0",
     data_path="data/",
-    results_path="results/"
+    results_path="results/",
+    seed=42,
 )
 
-# Reset with configuration
 obs, info = env.reset(options={
-    'day': 'monday',
-    'timeslot': 0,
-    'total_timeslots': 56,
-    'maximum_number_of_bikes': 3500,
-    'depot_id': 1
+    "total_timeslots": 56,            # 7 days x 8 slots
+    "maximum_number_of_bikes": 500,
+    "minimum_number_of_bikes": 1,     # minimum bikes per cell at start
+    "depot_id": 18,                   # must be a cell id of your grid
 })
 
-# Training loop
 done = False
 while not done:
     action = env.action_space.sample()  # Replace with your policy
-    obs, reward, terminated, truncated, info = env.step(action)
-    done = terminated or truncated
+    obs, reward, done, timeslot_done, info = env.step(action)
 
 env.close()
 ```
 
+Note: `step()` returns `(observation, reward, done, timeslot_terminated, info)`.
+The 4th value flags the end of a 3-hour timeslot (not a Gymnasium `truncated`); `done` marks the end of the episode.
+
+The first `reset()` precomputes a whole week of trip events (it can take a while and is cached in `data/.cache`);
+afterwards the next episode is computed in a background process while the current one runs.
+Call `env.close()` to stop that process.
+
 ### StaticEnv - TSP-Based Baseline
 
 ```python
-import gymnasium as gym
-
-# Create static environment for baseline comparison
-env = gym.make(
-    "gymnasium_env/StaticEnv-v0",
-    data_path="data/"
-)
+env = gym.make("gymnasium_env/StaticEnv-v0", data_path="data/", results_path="results/")
 
 obs, info = env.reset(options={
-    'day': 'monday',
-    'maximum_number_of_bikes': 3500,
-    'num_rebalancing_events': 2  # Rebalancing operations per day
+    "total_timeslots": 56,
+    "maximum_number_of_bikes": 500,
+    "depot_id": 18,
+    "num_rebalancing_events": 2,         # rebalancing operations per day
+    "starting_rebalancing_event": 1,     # hour of the first one (1 -> 01:00 and 13:00)
 })
+done = False
+while not done:
+    _, _, done, _, info = env.step(0)    # the action is ignored
 ```
 
 ---
@@ -99,21 +102,71 @@ Discrete action space with 8 actions:
 
 #### Observation Space
 
-The observation is a graph-structured state containing:
-- **Node features** (per cell): bike count, critic score, battery levels, demand/arrival rates, rebalancing history, truck presence
-- **Edge features**: normalized distances between adjacent cells
-- **Global features**: simulation time, truck load, depot inventory
+A flat `Box` vector of size `17 + 2 × n_cells` (float16):
+
+| Part | Size | Content |
+|------|------|---------|
+| scalars | 5 | system bike ratio, depot bike ratio, surplus flag of truck cell, empty flag of truck cell, global critic score / n_cells |
+| previous action | 8 | one-hot of the last action |
+| truck position | n_cells | one-hot of the truck cell |
+| critical cells | n_cells | 1 if the cell is critical |
+| borders | 4 | 1 for each missing neighbour (up, down, left, right) |
+
+The spatial/graph information is exposed separately through `info["cell_dict"]` (a `{cell_id: Cell}` dict that is updated in place)
+together with `info["nodes_dict"]` and `info["distance_lookup"]` (returned by `reset`). The trainer builds a graph of
+cells from these (`rl_training.utils.build_cell_graph_from_cells`) to feed a GNN.
+Cell features available through `Cell.get_all_metrics()`: `truck_cell`, `critic_score`, `eligibility_score`, `total_bikes`,
+`surplus_bikes`, `dead_bikes`, `demand_rate`, `arrival_rate`, `failures`, `failure_rate`, `visits`, `operations`,
+`pick_ups`, `drops`, `total_rebalanced`, ...
+
+#### Critic score
+
+For each cell, `critic = -1 + exp((1 + 0.2·bikes_arriving_later) · (1 − bikes / expected))`, where `expected` is the peak
+net outflow (departures − arrivals) expected in the next 3 hours plus `minimum_number_of_bikes`, and
+`bikes_arriving_later` the arrivals expected after that peak. A cell is *critical* when the score is
+positive (with `use_binary_critic=True`, the default, critical cells have score exactly 1.0).
+`surplus_bikes` counts the bikes a cell could give away without becoming critical.
+
+How the next 3 hours are anticipated is set by `critic_mode`:
+
+| `critic_mode` | Source of the expected flows |
+|---------------|------------------------------|
+| `"poisson"` (default) | A **forecast sampled from the demand model**: for each cell and slot, a Poisson number of departures and arrivals (the same per-slot rates the simulator uses) at uniform times. It is drawn with its own RNG, independently of the trips the simulator will really generate, so the agent has **no look-ahead** on the realised trips. |
+| `"oracle"` | Reads the **realised** future trips from the simulator's event buffer (the future is known exactly). Kept for ablations. |
+
+The forecast is drawn once per timeslot (two slots ahead, like the event buffer) and then slides with the clock; a new
+scenario is drawn only for each newly entered slot. It is deliberately *not* redrawn at every step: the reward contains the
+change of the global critic score, and resampling would turn the forecast noise into reward noise. The forecast is reproducible
+for a given `reset(seed=...)`. Note that it is a single noisy scenario: it is unbiased, but a cell's peak net outflow has a standard
+deviation of the same order as its mean.
+
+The oracle also leaks into the rewards and observation, so results obtained with `critic_mode="oracle"` are optimistic.
 
 #### Reward Function
 
-Complex reward encouraging efficient rebalancing:
-- **Base cost**: -0.1 per step (encourages efficiency)
-- **Invalid actions**: -1.0 penalty
-- **Self-loops**: -0.6 penalty (back-and-forth movements)
-- **Drop rewards**: Up to +2.0 for rebalancing critical cells
-- **Pick-up rewards**: Positive for removing bikes from surplus cells
-- **Charge rewards**: Up to +0.5 for useful battery swaps
-- **Stay penalties**: -1.0 in critical cells, +0.3 if no critical cells exist
+All constants live in `RewardComponents` (`fully_dynamic_env.py`). Main terms:
+
+| Term | Value |
+|------|-------|
+| Base cost per step | -0.1 |
+| Invalid action (returns immediately) | -1.0 |
+| Back-and-forth loop (UP/DOWN, LEFT/RIGHT, STAY/STAY, PICK_UP/DROP) | -0.6 |
+| Drop in a critical cell that becomes balanced | +2.0 |
+| Drop in a critical cell that stays critical | +1.0 |
+| Drop in a surplus cell | -0.5 |
+| Drop elsewhere | +0.01 |
+| Pick-up from a critical cell / that makes the cell critical | -0.5 / -2.0 |
+| Pick-up from a surplus cell | +0.2 |
+| Charge a low-battery bike (critical / normal cell) | +0.5 / +0.3 |
+| Charge a bike that did not need it (critical / normal cell) | -0.1 / -0.3 |
+| Move to a recently visited, non-critical cell | -0.2 (+0.1 × border type of the cell left) |
+| Move to a barely visited cell | +0.3 |
+| Move with an empty truck | -0.05 |
+| Stay in a critical cell | -1.0 |
+| Stay otherwise / when no cell is critical | -0.1 / 0.0 |
+| Deployment / idle depot shaping | +0.02·deployed ratio / -0.02·depot ratio |
+| Change of global critic score | -0.5 · Δ |
+| Final step of the episode | -(total failures / total_timeslots) |
 
 #### Reset Options
 
@@ -122,8 +175,19 @@ Complex reward encouraging efficient rebalancing:
 | `day` | str | `'monday'` | Starting day of week |
 | `timeslot` | int | `0` | Starting timeslot (0-7, 3-hour intervals) |
 | `total_timeslots` | int | `56` | Total simulation duration (7 days = 56 slots) |
-| `maximum_number_of_bikes` | int | `500` | Total bike fleet size |
-| `depot_id` | int | `1` | Cell ID of bike depot |
+| `maximum_number_of_bikes` | int | `1000` | Total bike fleet size |
+| `minimum_number_of_bikes` | int | `5` | Minimum bikes per cell at the start |
+| `enable_repositioning` | bool | `True` | Distribute the bikes above the minimum (random, or by net flow) instead of leaving them in the depot |
+| `use_net_flow` | bool | `False` | Bias that distribution by predicted net outflow |
+| `use_binary_critic` | bool | `True` | Binary critical flag as critic score |
+| `critic_mode` | str | `"poisson"` | `"poisson"` (sampled forecast, no look-ahead) or `"oracle"` (realised future trips) |
+| `depot_id` | int | `1` | Cell id of the depot |
+| `initial_cell` | int | random | Truck starting cell |
+| `max_truck_load` | int | `30` | Truck capacity (starts with 15 bikes) |
+| `discount_factor` | float | `0.99` | Stored for the agent |
+| `results_path` | str | — | Per-episode log directory (enables env logging for that episode) |
+
+`reset(seed=...)` reseeds the environment, the action space and the trip sampling.
 
 #### Key Features
 
@@ -141,18 +205,27 @@ Baseline environment using periodic TSP-based system-wide rebalancing (no contin
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
-| `day` | str | `'monday'` | Starting day of week |
-| `maximum_number_of_bikes` | int | — | Total bike fleet size |
-| `num_rebalancing_events` | int | `1` | Rebalancing operations per day |
-| `fixed_rebal_bikes_per_cell` | int | `5` | Base bikes per cell during rebalancing |
-| `depot_id` | int | `491` | Cell ID of bike depot |
+| `total_timeslots` | int | `56` | Total simulation duration |
+| `maximum_number_of_bikes` | int | `1000` | Total bike fleet size |
+| `minimum_number_of_bikes` | int | `5` | Minimum bikes per cell |
+| `num_rebalancing_events` | int | `2` | Rebalancing operations per day |
+| `starting_rebalancing_event` | int | `1` | Hour of the first rebalancing; the others follow every `24 // num_rebalancing_events` hours |
+| `enable_repositioning` / `use_net_flow` | bool | `True` / `True` | Initial distribution (see FullyDynamicEnv) |
+| `depot_id` | int | `1` | Cell id of the depot |
+
+`step()` ignores the action and simulates **one whole 3-hour timeslot**. The returned observation is `{}` and the reward `0`.
+`info["failures"]` is the number of failed trips in that timeslot (an `int`), and `info["rebalance_times"]` lists the
+duration (s) of the rebalancing operations performed in it (`[0]` if none). `enable_repositioning` / `use_net_flow` only
+affect the initial distribution of the bikes.
 
 #### How It Works
 
-1. Bikes distributed based on predicted net flow
-2. At scheduled intervals (e.g., every 12 hours), system performs TSP-based rebalancing
-3. Surplus bikes picked up and delivered to deficit cells
-4. No continuous agent decisions; fully automated
+1. Bikes are distributed at reset (base allocation, optionally biased by predicted net flow)
+2. At each scheduled hour the target distribution (at least 1 bike per cell, extra bikes proportional to the predicted net
+   outflow of the next window) is computed
+3. A TSP route over the surplus / deficit cells gives the time a truck would need; this time is reported in `rebalance_times`
+4. The redistribution itself is applied **instantaneously**: all bikes at stations and in the depot are pooled and
+   re-placed according to the target (leftovers return to the depot)
 
 ---
 
@@ -191,16 +264,19 @@ The environments require preprocessed data in the specified `data_path`:
 ```
 data/
 ├── utils/
-│   ├── network.graphml       # OSM street network
-│   ├── cell_data.pkl                   # Spatial grid cells
-│   ├── distance_matrix.csv             # Station-to-station distances
+│   ├── network.graphml                 # OSM street network
+│   ├── cell_data.pkl                   # Spatial grid cells (dict of Cell objects)
+│   ├── distance_matrix.csv             # Node-to-node distances (rows: node_id, columns: str(node_id))
 │   ├── nearby_nodes.pkl                # Neighborhood lookup
-│   ├── ev_velocity_matrix.csv          # Time-varying travel speeds
-│   ├── ev_consumption_matrix.csv       # Expected trip volumes
-│   └── global_rates.pkl                # Demand rates by timeslot
-├── matrices/09-10/                     # PMF matrices (origin-destination probabilities)
-└── rates/09-10/                        # Poisson rate matrices per timeslot
+│   ├── ev_velocity_matrix.csv          # Truck speed by hour (rows) and day (columns)
+│   ├── ev_consumption_matrix.csv       # EV consumption by hour and day
+│   └── global_rates.pkl                # {(day, timeslot): trips per second}
+└── matrices/09-10/<day>/NN-pmf-matrix.csv   # Origin-destination PMF per day (monday...) and timeslot (00-07)
 ```
+
+The matrices folder name (`matrices/09-10`) is fixed in `simulator/utils.py` (`EnvPaths.matrices_folder`); it matches the
+default `months: [9, 10]` of the bundled sources. If you preprocess other months, update `EnvPaths` accordingly.
+The virtual node `10000` (trips starting/ending outside the covered area) must be present in the PMF matrices.
 
 Generate this data using the [`preprocessing`](../preprocessing) package.
 
@@ -234,23 +310,21 @@ Generate this data using the [`preprocessing`](../preprocessing) package.
 
 ### Environment Constants
 
-#### FullyDynamicEnv
+`EnvDefaults` in `fully_dynamic_env.py` (the trainer overrides the fleet / repositioning ones through `reset(options=...)`):
 
 ```python
-MAX_BIKES = 500                # Default fleet size
+MAX_BIKES = 1000               # Default fleet size
+MIN_BIKES_PER_CELL = 5
 MAX_TRUCK_LOAD = 30            # Truck capacity
 INITIAL_TRUCK_BIKES = 15       # Starting truck load
-TIMESLOT_DURATION_HOURS = 3    # Episode divided into 3-hour slots
-STEP_DURATION_SECONDS = 30     # Simulation step size
-DISCOUNT_FACTOR = 0.99         # RL discount factor
+TIMESLOT_DURATION_HOURS = 3    # Episode divided into 3-hour slots (first slot starts at 01:00)
+STEP_DURATION_SECONDS = 30     # Simulation tick
+DISCOUNT_FACTOR = 0.99
+ELIGIBILITY_DECAY = 0.9968     # Per tick; border cells use 0.99
 ```
 
-#### StaticEnv
-
-```python
-DEFAULT_BIKES_PER_CELL = 5            # Base allocation per cell
-DEFAULT_NUM_REBALANCING_EVENTS = 1    # Daily rebalancing operations
-```
+`StaticEnv` has its own `EnvDefaults` (`NET_FLOW_BASED_REPOSITIONING = True`, `INITIAL_TRUCK_BIKES = 0`,
+`DEFAULT_NUM_REBALANCING_EVENTS = 2`, `DEFAULT_STARTING_REBALANCING_EVENT = 1`).
 
 ---
 
@@ -258,43 +332,31 @@ DEFAULT_NUM_REBALANCING_EVENTS = 1    # Daily rebalancing operations
 
 ### Custom Reward Function
 
-Modify `FullyDynamicEnv._compute_reward()` to implement custom reward shaping:
+Edit the constants in `RewardComponents`, or the logic in `FullyDynamicEnv._get_reward()` and its `_compute_*` helpers:
 
 ```python
-def _compute_reward(self, action, time, distance, invalid_action):
-    # Your custom reward logic
-    reward = 0.0
-    # ... implementation ...
-    return reward
+def _get_reward(self, action, old_eligibility_score, old_critic_score,
+                old_global_critic_score, old_surplus_bikes) -> float:
+    ...
 ```
 
 ### Graph Neural Network Integration
 
-The environment provides a NetworkX graph representation suitable for GNNs:
+Build a graph of cells from the objects returned by `reset()` / `step()`:
 
 ```python
-# Access the cell subgraph
-subgraph = env._cell_subgraph
+from rl_training import build_cell_graph_from_cells, update_cell_graph_features, convert_graph_to_data
 
-# Node features available:
-# - truck_cell, low_battery_bikes, rebalanced
-# - failure_rates, failures, bikes, critic_score
-# - visits, operations, eligibility_score
+graph = build_cell_graph_from_cells(info["cell_dict"], info["nodes_dict"], info["distance_lookup"])
+# after each step:
+update_cell_graph_features(graph, info["cell_dict"])
+data = convert_graph_to_data(graph, node_features=["truck_cell", "critic_score", "eligibility_score", "total_bikes"])
 ```
 
 ### Logging and Debugging
 
-Enable detailed logging:
-
-```python
-env._logger.set_logging(True)
-```
-
-Logs include:
-- Action execution details
-- Trip failures and bike availability
-- Truck movements and load changes
-- State transitions
+Pass `logging_enabled=True` to `gym.make`, or give a `results_path` in `reset(options=...)` to log that episode
+to `<results_path>/logs/env.log`. Logs include the executed actions, trip failures, truck movements and state transitions.
 
 ---
 
@@ -316,8 +378,7 @@ pip install -e .
 
 **Solution**: Run preprocessing pipeline first:
 ```bash
-cd preprocessing
-bss-preprocess --data-path /path/to/data --steps download preprocess grid
+bss-preprocess --data-path /path/to/data --source bluebikes
 ```
 
 ### Memory Issues
@@ -327,7 +388,7 @@ bss-preprocess --data-path /path/to/data --steps download preprocess grid
 **Solution**: Reduce fleet size or simulation duration:
 ```python
 env.reset(options={
-    'maximum_number_of_bikes': 1000,    # Reduce from 3500
+    'maximum_number_of_bikes': 300,
     'total_timeslots': 16               # Reduce from 56 (2 days instead of 7)
 })
 ```
@@ -344,7 +405,7 @@ env.reset(options={
 **Solutions**:
 - Reduce bike fleet size
 - Increase cell size in preprocessing
-- Disable logging: `env._logger.set_logging(False)`
+- Keep logging disabled (the default)
 
 ---
 

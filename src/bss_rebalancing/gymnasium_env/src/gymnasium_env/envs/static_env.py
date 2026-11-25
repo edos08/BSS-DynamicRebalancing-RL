@@ -414,7 +414,7 @@ class StaticEnv(gym.Env):
         if self._num_rebalancing_events > 0:
             interval = 24 // self._num_rebalancing_events
             self._rebalancing_hours = [
-                (i + EnvDefaults.DEFAULT_STARTING_REBALANCING_EVENT) % 24 for i in range(0, 24, interval)
+                (i + self._starting_rebalancing_event) % 24 for i in range(0, 24, interval)
             ]
             self._rebalancing_hours = sorted(self._rebalancing_hours)
 

@@ -245,6 +245,7 @@ def run_benchmark(config: dict):
     params['seed'] = config['seed']
     params["num_seed_runs"] = config["num_seed_runs"]
     params['num_rebalancing_events'] = config['num_rebal_events']
+    params['starting_rebalancing_event'] = config['start_rebal_hour']
     params['maximum_number_of_bikes'] = config['maximum_number_of_bikes']
     params['minimum_number_of_bikes'] = config['minimum_number_of_bikes']
     params['enable_repositioning'] = config['enable_repositioning']
@@ -435,6 +436,12 @@ def parse_arguments() -> dict:
         help='Number of rebalancing events to simulate'
     )
     parser.add_argument(
+        '--start-rebal-hour',
+        type=int,
+        default=params['starting_rebalancing_event'],
+        help='Clock hour (0-23) of the first rebalancing event; the others follow every 24 // num-rebal-events hours.'
+    )
+    parser.add_argument(
         '--enable-repositioning',
         action='store_true',
         help='Enable repositioning beyond minimum bikes per cell at the start of each episode.'
@@ -474,6 +481,7 @@ def parse_arguments() -> dict:
         'maximum_number_of_bikes': args.max_num_bikes,
         'minimum_number_of_bikes': args.min_num_bikes,
         'num_rebal_events': args.num_rebal_events,
+        'start_rebal_hour': args.start_rebal_hour,
         'enable_repositioning': args.enable_repositioning,
         'use_net_flow': args.use_net_flow,
         'seed': args.seed,
