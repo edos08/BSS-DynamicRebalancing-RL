@@ -15,6 +15,7 @@ days.
 ``volume.parquet``       every calendar day: group, holiday, count, month factor, day factor
 ``volume.json``          month factors, day-noise sigma, group levels, scheme
 ``shape.npz``            rates [G, 24, P, P] (trips/hour at volume factor 1), exposure, config
+``ride_time.npz``        speed quantiles per (bike type, distance band), round-trip durations
 ``demand_report.json``   selection table, chosen settings, place-assignment report
 =======================  ==================================================================
 """
@@ -33,6 +34,8 @@ import yaml
 
 from bss_scenario.demand.calendar import DAY_GROUPS, day_group
 from bss_scenario.demand.places import Places, assign_places, assignment_report
+from bss_scenario.demand.ride_time import fit_ride_time
+from bss_scenario.demand.ride_time import summary as ride_summary
 from bss_scenario.demand.shape import ShapeConfig, ShapeModel, fit_shape
 from bss_scenario.demand.volume import VolumeModel, daily_counts, fit_volume
 from bss_scenario.network.graph import Projection
@@ -135,6 +138,13 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
         "sigma": volume.sigma, "sigma_all_days": volume.sigma_all_days,
         "fit_period": [d.isoformat() for d in fp]}, indent=2) + "\n")
     model.save(out / "shape.npz")
+
+    in_city = stations.filter("in_city").sort("station_id")
+    place_node = in_city["bike_node"].to_numpy()
+    bike_dist = np.load(root / "network" / "bike_dist.npy", mmap_mode="r")
+    place_dist = np.asarray(bike_dist[np.ix_(place_node, place_node)])  # [P-1, P-1] station-node distances
+    ride = fit_ride_time(fit_trips, np.arange(len(place_node)), place_dist, places.external)
+    ride.save(out / "ride_time.npz")
     report = {
         "config": {**asdict(config), "fit_period": [d.isoformat() for d in fp]},
         "chosen": {k: best[k] for k in ("scheme", "alpha", "beta", "loglik_per_trip")},
@@ -143,6 +153,7 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
         "fit_trips": fit_trips.height,
         "expected_trips_per_day": dict(zip(model.groups, map(float, model.rates.sum(axis=(1, 2, 3))))),
         "assignment": assignment_report(fit_trips, places),
+        "ride_time": ride_summary(ride),
     }
     (out / "demand_report.json").write_text(json.dumps(report, indent=2, default=str) + "\n")
     return report
