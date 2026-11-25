@@ -255,6 +255,14 @@ one hour at a time, on the `SlotStart` event.
 Typical use: train on `PoissonDemand`, evaluate on `ReplayDemand` for held-out dates, validate the
 simulator by replaying history (§11).
 
+**Validation (#85).** `scripts/validate_demand.py` refits the model on the training days of the
+selection split and compares `PoissonDemand` with the requests recorded on the 49 held-out days,
+against an empirical baseline (the training days' own recorded requests). Report:
+[`reports/demand-validation.md`](reports/demand-validation.md). Cambridge 2024: daily volume within
+1–7 %; hourly, OD and origin distributions as close as the empirical baseline; ride times KS
+0.02–0.05, because generated rides use node-to-node distances after spreading while recorded
+durations are between stations.
+
 ### 6.4 Ride time
 
 Fitted from data instead of the old fixed truncated Gaussian (15 ± 5 km/h): speed distribution
