@@ -11,11 +11,12 @@ days.
 **Outputs** (``<bundle>/demand/``):
 
 =======================  ==================================================================
-``places.parquet``       place index -> station id (``EXTERNAL`` last)
+``places.parquet``       place index -> station id, bike node (``EXTERNAL`` last, node -1)
 ``volume.parquet``       every calendar day: group, holiday, count, month factor, day factor
 ``volume.json``          month factors, day-noise sigma, group levels, scheme
 ``shape.npz``            rates [G, 24, P, P] (trips/hour at volume factor 1), exposure, config
 ``ride_time.npz``        speed quantiles per (bike type, distance band), round-trip durations
+``spread.npz``           kernel spreading of each in-city place over bike nodes (dockless)
 ``demand_report.json``   selection table, chosen settings, place-assignment report
 =======================  ==================================================================
 """
@@ -36,9 +37,11 @@ from bss_scenario.demand.calendar import DAY_GROUPS, day_group
 from bss_scenario.demand.places import Places, assign_places, assignment_report
 from bss_scenario.demand.ride_time import fit_ride_time
 from bss_scenario.demand.ride_time import summary as ride_summary
+from bss_scenario.demand.spread import kernel_spread, spread_report
 from bss_scenario.demand.shape import ShapeConfig, ShapeModel, fit_shape
 from bss_scenario.demand.volume import VolumeModel, daily_counts, fit_volume
 from bss_scenario.network.graph import Projection
+from bss_scenario.network.paths import Neighbours
 from bss_scenario.trips.clean import read_trips
 
 
@@ -51,6 +54,8 @@ class DemandConfig:
     holdout_fraction: float = 0.2
     seed: int = 2024
     holidays_as_sunday: bool = True
+    spread_radius_m: float = 400.0   # dockless catchment of a station (walking distance)
+    spread_scale_m: float = 150.0    # exponential decay of demand away from the station
 
 
 def split_days(days: list[dt.date], fraction: float, seed: int) -> tuple[list[dt.date], list[dt.date]]:
@@ -131,7 +136,11 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
     model = fit_shape(fit_trips, places, days, volume,
                       ShapeConfig(best["scheme"], best["alpha"], best["beta"], config.holidays_as_sunday))
 
-    places.table().write_parquet(out / "places.parquet")
+    in_city = stations.filter("in_city").sort("station_id")
+    place_node = in_city["bike_node"].to_numpy()
+    places.table().with_columns(
+        pl.Series("bike_node", np.append(place_node, -1).astype(np.int32))
+    ).write_parquet(out / "places.parquet")
     volume.days.write_parquet(out / "volume.parquet")
     (out / "volume.json").write_text(json.dumps({
         "scheme": volume.scheme, "month_factor": volume.month_factor, "group_level": volume.group_level,
@@ -139,12 +148,15 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
         "fit_period": [d.isoformat() for d in fp]}, indent=2) + "\n")
     model.save(out / "shape.npz")
 
-    in_city = stations.filter("in_city").sort("station_id")
-    place_node = in_city["bike_node"].to_numpy()
     bike_dist = np.load(root / "network" / "bike_dist.npy", mmap_mode="r")
     place_dist = np.asarray(bike_dist[np.ix_(place_node, place_node)])  # [P-1, P-1] station-node distances
     ride = fit_ride_time(fit_trips, np.arange(len(place_node)), place_dist, places.external)
     ride.save(out / "ride_time.npz")
+
+    walk = Neighbours.load(root / "network" / "bike_walk_nbrs.npz")
+    # the catchment cannot exceed the walking radius stored in the network (the report records it)
+    spread = kernel_spread(place_node, walk, min(config.spread_radius_m, walk.max_radius_m), config.spread_scale_m)
+    spread.save(out / "spread.npz")
     report = {
         "config": {**asdict(config), "fit_period": [d.isoformat() for d in fp]},
         "chosen": {k: best[k] for k in ("scheme", "alpha", "beta", "loglik_per_trip")},
@@ -154,6 +166,7 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
         "expected_trips_per_day": dict(zip(model.groups, map(float, model.rates.sum(axis=(1, 2, 3))))),
         "assignment": assignment_report(fit_trips, places),
         "ride_time": ride_summary(ride),
+        "spread": spread_report(spread, len(walk.indptr) - 1),
     }
     (out / "demand_report.json").write_text(json.dumps(report, indent=2, default=str) + "\n")
     return report

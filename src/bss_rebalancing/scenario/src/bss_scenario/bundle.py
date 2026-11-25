@@ -42,7 +42,7 @@ COMPONENT_FILES: dict[str, tuple[str, ...]] = {
                 "network/drive_time.npy", "network/bike_to_drive.npz", "network/network_report.json"),
     "stations": ("stations/stations.parquet", "stations/stations_report.json"),
     "demand": ("demand/places.parquet", "demand/volume.parquet", "demand/volume.json", "demand/shape.npz",
-               "demand/ride_time.npz", "demand/demand_report.json"),
+               "demand/ride_time.npz", "demand/spread.npz", "demand/demand_report.json"),
 }
 
 
