@@ -115,7 +115,7 @@ def test_forecast_matches_the_rates(dyn_env):
     totals = np.zeros(2)
     for _ in range(n):
         samples = env._sample_forecast_slot("monday", 0, 0.0)
-        totals += [sum((d > 0).sum() for _, d in samples), sum((d < 0).sum() for _, d in samples)]
+        totals += [sum((d > 0).sum() for _, d, _ in samples), sum((d < 0).sum() for _, d, _ in samples)]
     expected = np.array([dep.sum(), arr.sum()]) * duration
     sd = np.sqrt(expected / n)                      # sd of the mean of n Poisson counts
     assert np.all(np.abs(totals / n - expected) < 4 * sd)
@@ -134,3 +134,44 @@ def test_forecast_window_slides_with_the_slots(dyn_env):
     # events of the former "next slot" are now in [0, duration) (those not yet in the past)
     for before, after in zip(upcoming, now):
         assert set(np.round(after, 6)) <= set(np.round(before, 6))
+
+
+def test_inflight_trips_are_known(dyn_env):
+    """Arrivals of trips already on the road are used exactly as the simulator will deliver them."""
+    env = dyn_env.unwrapped
+    dyn_env.reset(options=dict(RESET, total_timeslots=3, critic_mode="poisson"))
+    checked = 0
+    for _ in range(120):
+        dyn_env.step(0)
+        truth = {i: [] for i in range(len(env._cell_order))}
+        for e in env._event_buffer:
+            if e.is_arrival():
+                trip = e.get_trip()
+                end = trip.get_end_location()
+                # departed (a bike was assigned), not failed, ends inside a cell
+                if trip.get_bike() is not None and not trip.is_failed() and end.get_station_id() != 10000:
+                    truth[env._cell_index[end.get_cell().get_id()]].append(e.time)
+        for i in truth:
+            tracked = sorted(t for t in env._inflight_arrivals[i] if t >= env._env_time)
+            real = sorted(t for t in truth[i] if t >= env._env_time)
+            assert tracked == real
+            checked += len(real)
+    assert checked > 0   # the test actually saw trips on the road
+
+
+def test_forecast_does_not_count_arrivals_of_departed_trips(dyn_env):
+    """A forecast arrival only counts while its departure is still in the future."""
+    env = dyn_env.unwrapped
+    dyn_env.reset(options=dict(RESET, critic_mode="poisson"))
+    # let (simulated) time pass without touching the forecast scenario
+    env._env_time = 3000
+    for i in range(len(env._cell_order)):
+        env._inflight_arrivals[i] = []
+    mx, aft = env._flows_from_forecast()
+    # recompute by brute force: only trips whose departure is >= now, i.e. valid_from >= now
+    for i, cell_id in enumerate(env._cell_order):
+        t, d, v = env._forecast_times[i], env._forecast_deltas[i], env._forecast_valid_from[i]
+        sel = (t >= 3000) & (t <= 3000 + 3 * 3600) & (v >= 3000)
+        net = np.cumsum(d[sel][np.argsort(t[sel], kind="stable")], dtype=int)
+        peak = max(0, int(net.max())) if net.size else 0
+        assert mx.get(cell_id, 0) == peak

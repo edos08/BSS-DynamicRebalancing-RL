@@ -19,6 +19,8 @@ import numpy as np
 import osmnx as ox
 import polars as pl
 
+from scipy.stats import truncnorm
+
 from collections import deque
 from dataclasses import dataclass, field
 from multiprocessing.process import BaseProcess
@@ -364,6 +366,10 @@ class FullyDynamicEnv(gym.Env):
         self._cell_order = list(self._cells.keys())
         self._forecast_times: list[np.ndarray] | None = None
         self._forecast_deltas: list[np.ndarray] | None = None
+        self._forecast_valid_from: list[np.ndarray] | None = None
+        # Trips already on the road are known: arrival times per cell (relative to slot start)
+        self._inflight_arrivals: list[list[float]] = [[] for _ in self._cell_order]
+        self._cell_index = {c: i for i, c in enumerate(self._cell_order)}
         self._slot_rate_cache: dict[tuple[str, int], dict] = {}
 
         # -------------------------------------------------------------------------
@@ -538,6 +544,8 @@ class FullyDynamicEnv(gym.Env):
         self._event_buffer = None
         self._forecast_times = None
         self._forecast_deltas = None
+        self._forecast_valid_from = None
+        self._inflight_arrivals = [[] for _ in self._cell_order]
 
         # -------------------------------------------------------------------------
         # Initialize truck
@@ -1076,32 +1084,69 @@ class FullyDynamicEnv(gym.Env):
 
     def _sample_forecast_slot(
         self, day: str, timeslot: int, offset: float
-    ) -> list[tuple[np.ndarray, np.ndarray]]:
+    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
         """
-        Sample the trips of one slot from the Poisson model (per cell: a Poisson number of
-        departures and of arrivals, uniform in time). Independent of the simulator's events.
+        Sample the trips of one slot from the demand model, the same way the simulator does
+        (Poisson number of trips, origin/destination from the PMF, travel time from distance and
+        a truncated-Gaussian speed), but with an independent RNG: it is NOT the set of trips the
+        simulator will actually generate.
+
+        Returns, per cell (self._cell_order), arrays (times, deltas, valid_from): a departure is
+        +1 at its time, the matching arrival -1 at departure + travel time. `valid_from` is the
+        departure time of the trip: an arrival is only part of the forecast while its departure
+        is still in the future (afterwards the trip is either known to be in flight or failed).
         """
         duration = EnvDefaults.TIMESLOT_DURATION_SECONDS
-        dep_rate, arr_rate = self._slot_cell_rates(day, timeslot)
-        n_dep = self._forecast_rng.poisson(dep_rate * duration)
-        n_arr = self._forecast_rng.poisson(arr_rate * duration)
+        rng = self._forecast_rng
+        pmf = self._load_pmf_matrix(day, timeslot)
+        global_rate = self._global_rate_dict[(day.lower(), timeslot)]
+        row_ids = pmf["node_id"].to_numpy()
+        col_ids = np.array([int(c) for c in pmf.columns[1:]])
+        cumulative = np.cumsum(pmf.drop("node_id").to_numpy().ravel())
+
+        n_trips = rng.poisson(global_rate * duration)
+        dep_times = offset + np.floor(rng.uniform(0.0, duration, size=n_trips))
+        picks = np.minimum(np.searchsorted(cumulative, rng.random(n_trips)), len(cumulative) - 1)
+        origins = row_ids[picks // len(col_ids)]
+        destinations = col_ids[picks % len(col_ids)]
+
+        external = (origins == 10000) | (destinations == 10000)
+        distances = np.zeros(n_trips)
+        for k in np.flatnonzero(~external):
+            distances[k] = int(self._distance_lookup[int(origins[k])][str(int(destinations[k]))])
+        speeds = truncnorm.rvs(-2.0, 2.0, loc=15, scale=5, size=n_trips, random_state=rng)  # 5-25 km/h
+        travel = np.where(external, 1, np.floor(distances * 3.6 / speeds))
+
+        per_cell: list[list[tuple[float, int, float]]] = [[] for _ in self._cell_order]
+        for k in range(n_trips):
+            o, d = int(origins[k]), int(destinations[k])
+            if o != 10000:
+                per_cell[self._cell_index[self._stations[o].get_cell().get_id()]].append(
+                    (dep_times[k], 1, dep_times[k])
+                )
+            if d != 10000:
+                per_cell[self._cell_index[self._stations[d].get_cell().get_id()]].append(
+                    (dep_times[k] + travel[k], -1, dep_times[k])
+                )
+
         samples = []
-        for i in range(len(self._cell_order)):
-            k = int(n_dep[i] + n_arr[i])
-            times = offset + self._forecast_rng.uniform(0.0, duration, size=k)
-            deltas = np.concatenate(
-                [np.ones(n_dep[i], dtype=np.int8), -np.ones(n_arr[i], dtype=np.int8)]
-            )
-            samples.append((times, deltas))
+        for events in per_cell:
+            if events:
+                arr = np.array(events, dtype=float)
+                samples.append((arr[:, 0], arr[:, 1].astype(np.int8), arr[:, 2]))
+            else:
+                samples.append((np.empty(0), np.empty(0, dtype=np.int8), np.empty(0)))
         return samples
 
-    def _extend_forecast(self, samples: list[tuple[np.ndarray, np.ndarray]]) -> None:
-        for i, (times, deltas) in enumerate(samples):
+    def _extend_forecast(self, samples: list[tuple[np.ndarray, np.ndarray, np.ndarray]]) -> None:
+        for i, (times, deltas, valid_from) in enumerate(samples):
             merged_t = np.concatenate([self._forecast_times[i], times])
             merged_d = np.concatenate([self._forecast_deltas[i], deltas])
+            merged_v = np.concatenate([self._forecast_valid_from[i], valid_from])
             order = np.argsort(merged_t, kind="stable")
             self._forecast_times[i] = merged_t[order]
             self._forecast_deltas[i] = merged_d[order]
+            self._forecast_valid_from[i] = merged_v[order]
 
     def _advance_forecast(self, next_slot_index: int) -> None:
         """
@@ -1114,9 +1159,9 @@ class FullyDynamicEnv(gym.Env):
         next_timeslot = next_slot_index % EnvDefaults.TIMESLOTS_PER_DAY
 
         if self._forecast_times is None:
-            empty_t = [np.empty(0) for _ in self._cell_order]
-            empty_d = [np.empty(0, dtype=np.int8) for _ in self._cell_order]
-            self._forecast_times, self._forecast_deltas = empty_t, empty_d
+            self._forecast_times = [np.empty(0) for _ in self._cell_order]
+            self._forecast_deltas = [np.empty(0, dtype=np.int8) for _ in self._cell_order]
+            self._forecast_valid_from = [np.empty(0) for _ in self._cell_order]
             self._extend_forecast(self._sample_forecast_slot(self._day, self._timeslot, 0.0))
         else:
             for i in range(len(self._cell_order)):
@@ -1124,6 +1169,8 @@ class FullyDynamicEnv(gym.Env):
                 keep = times >= 0.0
                 self._forecast_times[i] = times[keep]
                 self._forecast_deltas[i] = self._forecast_deltas[i][keep]
+                self._forecast_valid_from[i] = self._forecast_valid_from[i][keep] - duration
+                self._inflight_arrivals[i] = [t - duration for t in self._inflight_arrivals[i] if t - duration >= 0.0]
         self._extend_forecast(self._sample_forecast_slot(next_day, next_timeslot, duration))
 
     def _load_pmf_matrix(self, day: str, timeslot: int) -> pl.DataFrame:
@@ -1193,6 +1240,15 @@ class FullyDynamicEnv(gym.Env):
                 truck_load=self._truck.get_load(),
             )
             total_step_failures += failure
+
+            # Known information: a trip that just left is on the road until its (known) arrival
+            if self._critic_mode == "poisson" and event.is_departure():
+                trip = event.get_trip()
+                end = trip.get_end_location()
+                if not trip.is_failed() and end.get_station_id() != 10000:
+                    self._inflight_arrivals[self._cell_index[end.get_cell().get_id()]].append(
+                        event.time + (trip.get_end_time() - trip.get_start_time())
+                    )
 
         return total_step_failures
 
@@ -1559,9 +1615,12 @@ class FullyDynamicEnv(gym.Env):
 
     def _flows_from_forecast(self) -> tuple[dict[int, int], dict[int, int]]:
         """
-        Same quantities as the oracle, computed on the sampled Poisson forecast: for each
-        cell, running net outflow (departures - arrivals) over the window
-        [env_time, env_time + slot duration]; its peak (>= 0) and the arrivals after it.
+        Same quantities as the oracle, computed without looking at the simulator's future trips.
+        Per cell, over the window [env_time, env_time + slot duration], the running net outflow
+        (departures - arrivals) is built from
+          - the arrivals of trips already on the road (known), and
+          - the forecast trips that have not departed yet (their departures and arrivals);
+        then its peak (>= 0) and the arrivals after that peak are returned.
         """
         window_start = self._env_time
         window_end = window_start + EnvDefaults.TIMESLOT_DURATION_SECONDS
@@ -1572,9 +1631,19 @@ class FullyDynamicEnv(gym.Env):
             times = self._forecast_times[i]
             lo = np.searchsorted(times, window_start, side="left")
             hi = np.searchsorted(times, window_end, side="right")
-            if hi <= lo:
+            seg_t = times[lo:hi]
+            seg_d = self._forecast_deltas[i][lo:hi]
+            future = self._forecast_valid_from[i][lo:hi] >= window_start
+            seg_t, seg_d = seg_t[future], seg_d[future]
+
+            known = [t for t in self._inflight_arrivals[i] if window_start <= t <= window_end]
+            if known:
+                seg_t = np.concatenate([seg_t, known])
+                seg_d = np.concatenate([seg_d, -np.ones(len(known), dtype=np.int8)])
+                seg_d = seg_d[np.argsort(seg_t, kind="stable")]
+            if seg_d.size == 0:
                 continue
-            net = np.cumsum(self._forecast_deltas[i][lo:hi], dtype=np.int64)
+            net = np.cumsum(seg_d, dtype=np.int64)
             peak = max(0, int(net.max()))
             expected_max_departure[cell_id] = peak
             expected_after_arrival[cell_id] = peak - int(net[-1])

@@ -131,11 +131,11 @@ How the next 3 hours are anticipated is set by `critic_mode`:
 
 | `critic_mode` | Source of the expected flows |
 |---------------|------------------------------|
-| `"poisson"` (default) | A **forecast sampled from the demand model**: for each cell and slot, a Poisson number of departures and arrivals (the same per-slot rates the simulator uses) at uniform times. It is drawn with its own RNG, independently of the trips the simulator will really generate, so the agent has **no look-ahead** on the realised trips. |
+| `"poisson"` (default) | A **forecast sampled from the demand model**, plus what is **already known**. The forecast draws whole trips the way the simulator does (Poisson number of trips from the slot's global rate, origin/destination from the PMF, travel time from distance and a truncated-Gaussian speed) with its own RNG, independently of the trips the simulator will really generate. Trips **already on the road** are taken from the simulation (their arrival times are known), and a forecast arrival counts only while its departure is still in the future, so nothing is counted twice. The agent has **no look-ahead** on trips that have not started. |
 | `"oracle"` | Reads the **realised** future trips from the simulator's event buffer (the future is known exactly). Kept for ablations. |
 
 The forecast is drawn once per timeslot (two slots ahead, like the event buffer) and then slides with the clock; a new
-scenario is drawn only for each newly entered slot. It is deliberately *not* redrawn at every step: the reward contains the
+scenario is drawn only for each newly entered slot (about 2 ms per slot on the toy grid, vs ~190 steps per slot). It is deliberately *not* redrawn at every step: the reward contains the
 change of the global critic score, and resampling would turn the forecast noise into reward noise. The forecast is reproducible
 for a given `reset(seed=...)`. Note that it is a single noisy scenario: it is unbiased, but a cell's peak net outflow has a standard
 deviation of the same order as its mean.
