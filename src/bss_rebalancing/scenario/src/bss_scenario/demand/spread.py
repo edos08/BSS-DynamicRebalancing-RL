@@ -32,6 +32,7 @@ class Spread:
     probs: np.ndarray         # float32 [nnz], sum to 1 per station
     radius_m: float
     scale_m: float
+    station_nodes: np.ndarray | None = None  # int32 [S]: each place's station node (for docked mode)
 
     @property
     def n_stations(self) -> int:
@@ -42,19 +43,22 @@ class Spread:
         return self.nodes[a:b], self.probs[a:b]
 
     def save(self, path: str | Path) -> None:
+        station_nodes = self.station_nodes if self.station_nodes is not None else np.zeros(0, np.int32)
         np.savez(path, mode=np.array(self.mode), indptr=self.indptr, nodes=self.nodes, probs=self.probs,
-                 radius_m=np.float64(self.radius_m), scale_m=np.float64(self.scale_m))
+                 radius_m=np.float64(self.radius_m), scale_m=np.float64(self.scale_m), station_nodes=station_nodes)
 
     @classmethod
     def load(cls, path: str | Path) -> Spread:
         with np.load(path) as z:
-            return cls(str(z["mode"]), z["indptr"], z["nodes"], z["probs"], float(z["radius_m"]), float(z["scale_m"]))
+            nodes = z["station_nodes"] if "station_nodes" in z and len(z["station_nodes"]) else None
+            return cls(str(z["mode"]), z["indptr"], z["nodes"], z["probs"], float(z["radius_m"]), float(z["scale_m"]),
+                       nodes)
 
 
 def station_spread(station_nodes: np.ndarray) -> Spread:
     s = len(station_nodes)
     return Spread("station", np.arange(s + 1, dtype=np.int64), station_nodes.astype(np.int32),
-                  np.ones(s, dtype=np.float32), 0.0, 0.0)
+                  np.ones(s, dtype=np.float32), 0.0, 0.0, station_nodes.astype(np.int32))
 
 
 def kernel_spread(station_nodes: np.ndarray, walk: Neighbours, radius_m: float = 400.0,
@@ -93,7 +97,8 @@ def kernel_spread(station_nodes: np.ndarray, walk: Neighbours, radius_m: float =
     indptr = np.concatenate([[0], np.cumsum(counts)]).astype(np.int64)
     totals = np.add.reduceat(w, indptr[:-1])
     probs = (w / np.repeat(totals, counts)).astype(np.float32)
-    return Spread("kernel", indptr, node_idx.astype(np.int32), probs, float(radius_m), float(scale_m))
+    return Spread("kernel", indptr, node_idx.astype(np.int32), probs, float(radius_m), float(scale_m),
+                  np.asarray(station_nodes, dtype=np.int32))
 
 
 def spread_report(spread: Spread, n_nodes: int) -> dict:

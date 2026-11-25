@@ -145,6 +145,8 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
     (out / "volume.json").write_text(json.dumps({
         "scheme": volume.scheme, "month_factor": volume.month_factor, "group_level": volume.group_level,
         "sigma": volume.sigma, "sigma_all_days": volume.sigma_all_days,
+        "holidays_as_sunday": config.holidays_as_sunday,
+        "ebike_share": float((fit_trips["bike_type"] == "electric").mean()),
         "fit_period": [d.isoformat() for d in fp]}, indent=2) + "\n")
     model.save(out / "shape.npz")
 
