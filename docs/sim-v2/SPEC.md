@@ -1,6 +1,6 @@
-# BSS Simulator v2 — Specification (draft for review)
+# BSS Simulator v2 — Specification
 
-Status: **draft** · Branch: `sim-v2` · Date: 2026-11-25
+Status: **accepted** (review decisions in §16) · Date: 2026-11-25
 
 This document specifies a new, independent simulator for bike-sharing systems (BSS) and the
 tooling around it. It replaces the simulation part of `gymnasium_env`; the current packages stay
@@ -51,6 +51,12 @@ frozen so that the thesis results remain reproducible.
 | D12 | Data: BlueBikes **2024**, full city of **Cambridge, MA** (OSM bike and drive networks). |
 | D13 | Truck travel times depend on historical traffic (TomTom when available) and trucks consume energy; both are pluggable models. |
 | D14 | Development is tracked on GitHub: issues, milestones, PRs into `dev`, CI (see `CONTRIBUTING.md`). |
+| D15 | Controllers do **not** know where trips in progress will end. Expected arrivals of in-flight bikes are a forecast, and every forecast must pass calibration tests (§8.1). |
+| D16 | Demand shape fitted on **Apr–Nov 2024** pooled; monthly volume level per month. |
+| D17 | Walking model defaults β = 150 m, radius 400 m, 1.4 m/s. |
+| D18 | Trips with one end outside Cambridge use the **external reservoir** (§6.5). |
+| D19 | Depot near **First Street × Cambridge Street** (East Cambridge); default fleet size from the operator's live feed (§7.2). |
+| D20 | Trucks are **electric vans** that **swap e-bike batteries on the street**; the battery stock is limited, and an empty stock sends the truck to the depot, after which it **resumes** the interrupted command (§9.1). |
 
 ---
 
@@ -192,7 +198,7 @@ year; the spatial pattern is stable from April to November and drifts in winter.
 
 Default estimator `PooledShapeEstimator`:
 1. **Fit period**: months where the shape is stable (default Apr–Nov 2024), configurable.
-2. **Counts** per (origin station, destination station, weekday, hour), including an
+2. **Counts** per (origin station, destination station, day group, hour), including an
    `EXTERNAL` pseudo-station for trips with one end outside Cambridge.
 3. **Exposure** = number of *calendar* days of that weekday in the fit period, each weighted by its
    volume factor (fixes the old bug that divided by "days with at least one trip").
@@ -200,6 +206,10 @@ Default estimator `PooledShapeEstimator`:
    `origin_rate(o, w, h) × p(d | o, coarser time band)`, so pairs seen once are not taken at face value.
 5. **Volume**: `volume(date) = month_level(month) × day_factor`, with `day_factor` log-normal,
    fitted on the observed daily totals. Weather can later become a covariate of `day_factor`.
+6. **Day grouping** (`day_groups`, configurable): which days share one hourly shape.
+   `per_weekday` = 7 separate shapes (Mon, Tue, …, Sun); `day_types` = 4 shapes
+   (Mon–Thu, Fri, Sat, Sun); `workday_weekend` = 2. More groups capture more detail but each has
+   less data. The default is chosen in M2 by held-out log-likelihood on Apr–Nov 2024 (#18).
 
 Later estimators (same interface): censoring-corrected demand (trips lost at empty stations),
 weather-conditioned volume.
@@ -270,7 +280,7 @@ On `TripRequest` at origin node `o`:
 
 ```yaml
 fleet:
-  size: 1500
+  size: 800                 # see "Default fleet size" below
   ebike_share: 0.2          # 0 = all mechanical, 1 = all electric
   battery_range_km: 60      # e-bike full range
   initial_battery: {dist: uniform, low: 0.3, high: 1.0}
@@ -282,6 +292,13 @@ energy:
 
 Riding consumes `distance × consumption`. No charging except battery swaps by operators
 (stations with chargers can be added later).
+
+**Default fleet size.** BlueBikes' public GBFS feed (snapshot 2026-11-25) lists, for the
+Cambridge region, 101 stations with 2,011 docks and 736 bikes parked (234 e-bikes); the whole
+system has about 4,900 bikes parked across 605 stations. Adding bikes in use, about 800 bikes
+serve Cambridge, roughly 40 % of its docks. The default is 800 with `ebike_share` taken from the
+2024 data; the M7 calibration (#32) tunes it so that replayed 2024 days reproduce the recorded
+service level.
 
 ---
 
@@ -298,10 +315,46 @@ Controllers never access the event queue. They get:
 | `SampledForecast` | one or K scenarios sampled from the demand model with an independent RNG | current critic |
 | `OracleForecast` | the simulator's realised future requests | **ablation only**; requires `allow_oracle=True`, logged in run metadata |
 
-- **In-flight trips**: `inflight_knowledge: none | count | destination`.
-  `destination` (arrival time and place of trips in progress) reproduces the current critic.
-  **Note for review:** a real dockless operator usually knows a bike is in use but not where it
-  will end. `count` is the realistic option; `destination` is kept to match the current setup.
+- **In-flight trips**: `inflight_knowledge: none | count | origin | destination`.
+
+| Level | Controller sees | Realistic? |
+|-------|-----------------|------------|
+| `none` | nothing about trips in progress | pessimistic |
+| `count` | number of bikes currently in use | yes |
+| `origin` (**default**) | for each trip in progress: where and when it started (the operator unlocked the bike) | yes |
+| `destination` | where and when each trip will end (the current critic) | **no**: ablation only, needs `allow_oracle=True` |
+
+  With `count` and `origin` the controller does not know where in-flight bikes will arrive, so the
+  forecast predicts it (§8.1).
+
+### 8.1 Arrival forecast for trips in progress
+
+For a trip that started at origin `o` at time `s` and has been running for `a = now − s`, the
+probability that it ends in destination group `g` within the window `(now, now + h]` is
+
+```
+                       Σ_{d ∈ g} p(d | o, s) · [F_od(a + h) − F_od(a)]
+P(arrive in g, by now+h) = ------------------------------------------------
+                       Σ_{d}     p(d | o, s) · [1 − F_od(a)]
+```
+
+where `p(d | o, s)` comes from the fitted demand shape (day group and hour of `s`) and `F_od` is
+the ride-time distribution (§6.4). The denominator conditions on the trip still running, so a
+trip that has already lasted long is more likely heading far.
+With `count`, `o` and `s` are replaced by their distribution given the recent departures.
+Expected arrivals per group are the sum over trips in progress; the sampled forecast draws each
+trip's destination and arrival time from the same distribution (an independent RNG stream).
+Future departures in the window are added from the demand model as before.
+
+**Calibration is part of the contract.** A wrong forecast gives the agent wrong information, so
+each forecast provider ships with tests (#29) run on simulated and on held-out 2024 data:
+
+- **Bias**: mean (predicted − realised) arrivals per group and horizon ≈ 0 (within the Monte
+  Carlo error).
+- **Coverage**: realised counts fall inside the 50 % / 90 % predictive intervals about 50 % / 90 %
+  of the time (PIT histogram flat).
+- **Sharpness** reported next to `destination` (oracle) and `none`, so the cost of not knowing
+  destinations is measured, not assumed.
 
 ---
 
@@ -311,11 +364,16 @@ Controllers never access the event queue. They get:
 trucks:
   count: 1
   capacity: 30
-  depot: {lat: ..., lon: ...}
+  depot: {lat: 42.37065, lon: -71.07692}   # First St × Cambridge St (OSM drive node 8508760490)
   start: depot              # | random_node | node id
   initial_load: 15
-  battery_stock: 20         # charged batteries carried, for swaps
-  service_time_s: {pickup_per_bike: 30, drop_per_bike: 30, swap_per_bike: 60, stop_overhead: 60}
+  battery_stock:
+    max: 60                 # charged e-bike batteries the truck can carry
+    initial: 60
+    on_empty: resume        # | idle  (see §9.1)
+  service_time_s: {pickup_per_bike: 30, drop_per_bike: 30, swap_per_bike: 60, stop_overhead: 60,
+                   depot_restock: 600}
+  vehicle: e_transit        # electric van preset, see "Energy"
 ```
 
 Commands (queued per truck, executed in order):
@@ -335,9 +393,33 @@ Commands (queued per truck, executed in order):
 3. per-segment historical speeds per weekday-hour (TomTom Traffic Stats), map-matched to OSM drive edges.
 Hours are grouped into a few traffic regimes so that time matrices stay small (one ~16 MB matrix per regime).
 
-**Energy** (`VehicleEnergyModel`, issue #28): consumption as a function of speed (constant-speed consumption
-curve, as used by TomTom's EV routing), stops and load. The truck battery (or fuel) is a resource;
-commands that would exhaust it are rejected, and `ToDepot()` recharges.
+**Energy** (`VehicleEnergyModel`, issue #28): trucks are **electric vans**. Consumption is a
+function of speed (constant-speed consumption curve, as used by TomTom's EV routing), stops and
+load. The default preset `e_transit` follows a Ford E-Transit cargo van (≈ 68 kWh usable battery,
+≈ 0.3–0.4 kWh/km in urban driving); the exact curve and figures are fixed and sourced in #28.
+The van battery is a resource like the battery stock: when it would drop below a reserve, the
+same depot rule as §9.1 applies, and the depot visit recharges it (charging time from the
+charger power).
+
+### 9.1 Depot returns and resuming
+
+Battery swaps happen **on the street**: `SwapBattery(n)` replaces the batteries of up to `n`
+e-bikes at the stop, using charged batteries from the truck's stock. The stock is limited
+(`battery_stock.max`); used batteries stay on the truck until the depot.
+
+When the stock is empty (or the van battery reaches its reserve) and the current or next command
+needs it:
+
+- `on_empty: resume` (**default**): the truck finishes the service in progress with what it has,
+  then inserts `ToDepot()` + `Restock()` at the head of its queue, drives to the depot, swaps
+  the used batteries for charged ones (`depot_restock` time), and then **resumes the interrupted
+  command where it was heading** (e.g. the `GoTo` target), followed by the rest of the queue. The
+  controller is notified (`TruckRestocking`, then `TruckResumed`) but does not have to act.
+- `on_empty: idle`: the truck stops, reports `TruckIdle(reason=STOCK_EMPTY)` and waits for the
+  controller to decide, e.g. to send it to the depot itself.
+
+Resuming the interrupted command, rather than returning to the point where the stock ran out,
+keeps the controller's plan valid and avoids a wasted trip back.
 
 Execution is honest about time: driving, stopping and handling all take time, and the state
 changes when they complete (fixes the old asymmetry where pick-ups happened at decision time).
@@ -438,15 +520,20 @@ no more instantaneous teleport), `DoNothing`, `GreedyDeficit`.
 
 ---
 
-## 16. Open questions for review
+## 16. Review decisions
 
-1. **In-flight knowledge** (§8): default `count` (realistic) or `destination` (as in the current critic)?
-2. **Fit period**: pool Apr–Nov 2024 for the shape, or Sep–Oct only?
-3. **Weekday resolution**: shape per weekday (7 × 24 slots) or day types (Mon–Thu, Fri, Sat, Sun)?
-   Per weekday is the default if the pooled data supports it.
-4. **Walking model defaults**: β = 150 m, radius 400 m, 1.4 m/s — acceptable as a starting point?
-5. **External trips**: reservoir model as in §6.5, or keep external trips out of the simulation entirely?
-6. **Depot location and fleet size** for Cambridge 2024 (the old value 18 was a cell id).
-7. **Truck battery stock / swap semantics**: is swapping batteries on the street the operation you
-   want to model, or should the truck collect e-bikes to charge them at the depot?
-8. **Truck vehicle**: electric van (model / battery capacity / consumption curve) or diesel? Determines the energy model defaults.
+Answers to the review questions (2026-11-25), recorded as D15–D20 in §2.
+
+| # | Question | Decision |
+|---|----------|----------|
+| 1 | In-flight knowledge | Destinations of trips in progress are **not** known. Default `origin` (where and when trips started), `count` also realistic; arrivals are forecast with calibrated probabilities (§8.1). `destination` is an oracle ablation. |
+| 2 | Fit period | Apr–Nov 2024 pooled. |
+| 3 | Weekday resolution | Configurable `day_groups` (§6.1); default chosen by held-out likelihood in M2. |
+| 4 | Walking model | β = 150 m, radius 400 m, 1.4 m/s. |
+| 5 | External trips | External reservoir (§6.5). |
+| 6 | Depot and fleet | Depot at First St × Cambridge St; fleet 800 by default (GBFS, §7.2), tuned in M7. |
+| 7 | Battery swaps | On the street, limited stock, depot return then resume (§9.1). |
+| 8 | Truck vehicle | Electric van, `e_transit` preset (§9). |
+
+Still open (not blocking M1): TomTom data access (Traffic Stats trial vs Routing API with
+historical traffic, #17).
