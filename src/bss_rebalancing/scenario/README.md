@@ -14,6 +14,22 @@ bss-scenario --help
 
 ## Commands
 
+### `bss-scenario build`: the whole bundle
+
+```bash
+bss-scenario build configs/scenarios/cambridge-2024.yaml --out data/scenarios/cambridge-2024
+bss-scenario check data/scenarios/cambridge-2024
+```
+
+Runs `trips`, `networks` and `stations` from one YAML config (paths relative to the YAML), then
+writes `scenario.yaml` and `manifest.json` (inputs and outputs with SHA-256, versions, command
+line). `check` verifies the schema version, that every component is complete, that only
+Parquet/NumPy/JSON/YAML files are present (no pickles) and, unless `--no-hashes`, every file hash.
+In Python: `bss_scenario.bundle.load_bundle(path, verify_hashes=False)`.
+Cambridge 2024: 25 files, 182 MB, 15 s.
+
+The steps can also be run one by one:
+
 ### `bss-scenario trips`: clean recorded trips
 
 ```bash
@@ -51,6 +67,21 @@ Rows are **flagged, never deleted** (except trips not touching the city with the
 
 Python: `bss_scenario.trips.read_trips(paths, valid_only=False)` reads and checks the tables
 (`TRIPS_SCHEMA`, `TRIPS_SCHEMA_VERSION`).
+
+### `bss-scenario networks` and `bss-scenario stations`
+
+```bash
+bss-scenario networks --bike data/raw/osm/cambridge_bike.graphml --drive data/raw/osm/cambridge_drive.graphml \
+  --out data/scenarios/cambridge-2024/network
+bss-scenario stations --trips data/scenarios/cambridge-2024/trips --boundary data/raw/osm/cambridge_boundary.geojson \
+  --gbfs data/raw/gbfs/2026-11-25/station_information.json --network data/scenarios/cambridge-2024/network \
+  --out data/scenarios/cambridge-2024/stations/stations.parquet
+```
+
+`networks`: node/edge tables (largest strongly connected component, shared metre projection),
+`bike_dist.npy`, walking neighbours, free-flow `drive_time.npy` (no busways), bike→drive mapping.
+`stations`: stations seen in valid trips with modal position, usage, GBFS capacity (dated
+snapshot, median fallback), `in_city` and nearest bike node.
 
 ### `bss-scenario traffic`: truck travel-time data
 
