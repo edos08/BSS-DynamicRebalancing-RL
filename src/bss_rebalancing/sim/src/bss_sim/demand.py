@@ -8,7 +8,7 @@ the simulator from its state (bikes nearby, battery, walking).
   ``N ~ Poisson(day_factor × month_factor × Σ rates[g, h])``, OD pairs by one categorical draw,
   uniform start times within the hour, nodes through the spreader, ride times from the fitted
   model and the bike type preference from the observed e-bike share.
-* :class:`ReplayDemand` (#84) replays recorded trips as requests.
+* :class:`ReplayDemand` replays recorded trips as requests.
 
 **Reproducibility.** Every (date, hour) uses its own random stream derived from
 ``(seed, date, hour)``, and the day factor from ``(seed, date)``. A given hour is therefore the
@@ -178,7 +178,7 @@ class DemandModel:
         return float(np.mean(same))
 
     def nodes_and_times(self, o: np.ndarray, d: np.ndarray, kind: np.ndarray,
-                        u_o: np.ndarray, u_d: np.ndarray, u_t: np.ndarray):
+                        u_o: np.ndarray, u_d: np.ndarray, u_t: np.ndarray | None):
         ext = self.external
         o_node = np.full(len(o), -1, np.int32)
         d_node = np.full(len(d), -1, np.int32)
@@ -188,7 +188,7 @@ class DemandModel:
         d_node[m] = self.spreader.sample(d[m], u_d[m])
         ride = np.full(len(o), np.nan, np.float32)
         inside = (o != ext) & (d != ext)
-        if self.bike_dist is not None and inside.any():
+        if u_t is not None and self.bike_dist is not None and inside.any():
             dist = np.asarray(self.bike_dist[o_node[inside], d_node[inside]], dtype=float)
             dist[o[inside] == d[inside]] = 0.0  # round trip by place
             ride[inside] = self.ride_times.sample(dist, kind[inside], u_t[inside])
@@ -229,6 +229,49 @@ class PoissonDemand:
         o_node, d_node, ride = self.model.nodes_and_times(o, d, kind, u[0], u[1], u[2])
         order = np.argsort(t, kind="stable")
         return TripRequests(t[order], o[order], d[order], o_node[order], d_node[order], ride[order], kind[order])
+
+    def day(self, date: dt.date) -> TripRequests:
+        return TripRequests.concat([self.hour(date, h) for h in range(24)])
+
+
+class ReplayDemand:
+    """Recorded trips as requests (#84, spec §6.3).
+
+    Reads ``demand/replay/YYYY-MM.npz``. Real start times and durations; places mapped to nodes
+    through the spreader with a seeded draw (the recorded dockless position is not kept);
+    the recorded bike type is the preference. Recorded trips are **requests, not outcomes**:
+    the simulator decides whether each is served. Known biases: demand censored by empty
+    stations in the data, origins displaced to where bikes were, no induced demand.
+    """
+
+    def __init__(self, model: DemandModel, bundle: str | Path, seed: int):
+        self.model = model
+        self.seed = int(seed)
+        self.dir = Path(bundle) / "demand" / "replay"
+        self.available = json.loads((self.dir / "index.json").read_text())
+        self._cache: dict[str, dict[str, np.ndarray]] = {}
+
+    def _month(self, key: str) -> dict[str, np.ndarray]:
+        if key not in self._cache:
+            if key not in self.available:
+                raise KeyError(f"no recorded trips for {key}; available: {sorted(self.available)}")
+            with np.load(self.dir / f"{key}.npz") as z:
+                self._cache[key] = {k: z[k] for k in z.files}
+        return self._cache[key]
+
+    def hour(self, date: dt.date, hour: int) -> TripRequests:
+        m = self._month(date.strftime("%Y-%m"))
+        day = m["date"] == date.toordinal()
+        sel = day & (m["t_s"] >= hour * 3600.0) & (m["t_s"] < (hour + 1) * 3600.0)
+        t = m["t_s"][sel]
+        o, d = m["o_place"][sel], m["d_place"][sel]
+        kind = m["kind"][sel].astype(np.int8)
+        rng = np.random.default_rng([self.seed, HOUR_STREAM, date.toordinal(), hour])
+        u = rng.random((2, len(t)))
+        o_node, d_node, _ = self.model.nodes_and_times(o, d, kind, u[0], u[1], None)
+        ride = m["duration_s"][sel].astype(np.float32)
+        ride[(o == self.model.external) | (d == self.model.external)] = np.nan
+        return TripRequests(t, o, d, o_node, d_node, ride, kind)
 
     def day(self, date: dt.date) -> TripRequests:
         return TripRequests.concat([self.hour(date, h) for h in range(24)])
