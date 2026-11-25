@@ -37,6 +37,7 @@ dependencies = [
     "bss-benchmark @ file:src/bss_rebalancing/benchmark",
     "bss-results-webapp @ file:src/bss_rebalancing/results_webapp",
     "bss-scenario @ file:src/bss_rebalancing/scenario",
+    "bss-sim @ file:src/bss_rebalancing/sim",
 ]
 
 [project.optional-dependencies]

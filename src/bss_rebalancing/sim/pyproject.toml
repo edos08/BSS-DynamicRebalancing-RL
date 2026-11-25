@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bss-sim"
+version = "0.1.0"
+description = "Discrete-event bike-sharing simulator (v2): RL-agnostic, fast, reproducible"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "Edoardo Scarpel", email = "edoardo.scarpel@phd.unipd.it"}
+]
+dependencies = [
+    "numpy>=2.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.urls]
+Repository = "https://github.com/edos08/BSS-DynamicRebalancing-RL"
+Specification = "https://github.com/edos08/BSS-DynamicRebalancing-RL/blob/dev/docs/sim-v2/SPEC.md"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+bss_sim = ["py.typed"]
