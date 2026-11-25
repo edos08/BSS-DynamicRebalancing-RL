@@ -17,6 +17,7 @@ days.
 ``shape.npz``            rates [G, 24, P, P] (trips/hour at volume factor 1), exposure, config
 ``ride_time.npz``        speed quantiles per (bike type, distance band), round-trip durations
 ``spread.npz``           kernel spreading of each in-city place over bike nodes (dockless)
+``replay/YYYY-MM.npz``   recorded valid trips as arrays for replay (+ ``replay/index.json``)
 ``demand_report.json``   selection table, chosen settings, place-assignment report
 =======================  ==================================================================
 """
@@ -109,6 +110,38 @@ def select_shape(trips: pl.DataFrame, places: Places, days: list[dt.date], daily
         (pl.col("loglik_per_trip") - pl.col("loglik_per_trip").max()).alias("delta_vs_best"))
 
 
+def export_replay(trips: pl.DataFrame, out_dir: Path) -> dict:
+    """Write recorded valid trips as compact NumPy arrays per local start month, for replay in bss_sim.
+
+    Arrays (sorted by date, then time): ``date`` (proleptic ordinal, int32), ``t_s`` (seconds after
+    local midnight, float64), ``o_place``/``d_place`` (int16), ``kind`` (int8, 1 = e-bike),
+    ``duration_s`` (float32).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    local = trips["start_time"]
+    df = trips.select(
+        pl.col("month"),
+        local.dt.date().alias("date"),
+        # cast before multiplying: hour/minute/second are Int8 in Polars (minute * 60 overflows)
+        (local.dt.hour().cast(pl.Float64) * 3600 + local.dt.minute().cast(pl.Float64) * 60
+         + local.dt.second().cast(pl.Float64) + local.dt.millisecond().cast(pl.Float64) / 1000).alias("t_s"),
+        "o_place", "d_place",
+        (pl.col("bike_type") == "electric").cast(pl.Int8).alias("kind"),
+        pl.col("duration_s").cast(pl.Float32),
+    ).sort(["date", "t_s"])
+    unix_epoch = dt.date(1970, 1, 1).toordinal()
+    index = {}
+    for (month,), part in df.partition_by("month", as_dict=True, maintain_order=True).items():
+        ordinals = (part["date"].cast(pl.Int32) + unix_epoch).to_numpy()  # days since 1970 -> date.toordinal()
+        np.savez_compressed(out_dir / f"{month}.npz", date=ordinals.astype(np.int32), t_s=part["t_s"].to_numpy(),
+                            o_place=part["o_place"].to_numpy().astype(np.int16),
+                            d_place=part["d_place"].to_numpy().astype(np.int16),
+                            kind=part["kind"].to_numpy(), duration_s=part["duration_s"].to_numpy())
+        index[month] = part.height
+    (out_dir / "index.json").write_text(json.dumps(index, indent=2) + "\n")
+    return index
+
+
 def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig()) -> dict:
     """Fit volume and shape from the bundle's trips and stations and write ``demand/``."""
     root = Path(bundle_root)
@@ -155,6 +188,8 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
     ride = fit_ride_time(fit_trips, np.arange(len(place_node)), place_dist, places.external)
     ride.save(out / "ride_time.npz")
 
+    replay_index = export_replay(assign_places(trips, stations, Projection(**scenario["projection"])), out / "replay")
+
     walk = Neighbours.load(root / "network" / "bike_walk_nbrs.npz")
     # the catchment cannot exceed the walking radius stored in the network (the report records it)
     spread = kernel_spread(place_node, walk, min(config.spread_radius_m, walk.max_radius_m), config.spread_scale_m)
@@ -168,6 +203,7 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
         "expected_trips_per_day": dict(zip(model.groups, map(float, model.rates.sum(axis=(1, 2, 3))))),
         "assignment": assignment_report(fit_trips, places),
         "ride_time": ride_summary(ride),
+        "replay": replay_index,
         "spread": spread_report(spread, len(walk.indptr) - 1),
     }
     (out / "demand_report.json").write_text(json.dumps(report, indent=2, default=str) + "\n")

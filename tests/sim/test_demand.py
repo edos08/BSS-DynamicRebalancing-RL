@@ -137,3 +137,39 @@ def test_sim_never_imports_builder_or_legacy():
                 [node.module] if isinstance(node, ast.ImportFrom) and node.module else [])
             for name in names:
                 assert name.split(".")[0] not in forbidden, f"{path.name} imports {name}"
+
+
+def test_replay_reproduces_recorded_trips(bundle, model):
+    from bss_sim.demand import ReplayDemand
+
+    rep = ReplayDemand(model, bundle, seed=4)
+    day = dt.date(2024, 9, 18)
+    r = rep.day(day)
+    assert len(r) == 60                                   # 60 recorded trips per day in the fixture
+    assert np.all(np.diff(r.t_s) >= 0)
+    hours = set((r.t_s // 3600).astype(int).tolist())
+    assert hours <= {8, 9, 17, 18}
+    ext = model.external
+    inside = (r.o_place != ext) & (r.d_place != ext)
+    np.testing.assert_allclose(r.ride_time_s[inside], 480.0)  # recorded 8-minute trips
+    assert np.all(np.isnan(r.ride_time_s[~inside]))
+    assert np.all((r.o_node == -1) == (r.o_place == ext))
+    again = ReplayDemand(model, bundle, seed=4).hour(day, 8)
+    np.testing.assert_array_equal(again.o_node, rep.hour(day, 8).o_node)
+    assert r.kind.mean() == pytest.approx(0.2, abs=0.1)
+    with pytest.raises(KeyError, match="no recorded trips"):
+        rep.day(dt.date(2023, 1, 5))
+
+
+def test_replay_times_are_exact(bundle, model):
+    """Regression: minute * 60 overflowed Int8 in the export and shifted trips into the previous hour."""
+    import polars as pl
+
+    from bss_sim.demand import ReplayDemand
+
+    day = dt.date(2024, 9, 18)
+    t = pl.read_parquet(bundle / "trips" / "2024-09.parquet").filter("valid")
+    local = t.filter(pl.col("start_time").dt.date() == day)["start_time"]
+    expected = np.sort((local.dt.hour().cast(pl.Float64) * 3600 + local.dt.minute().cast(pl.Float64) * 60
+                        + local.dt.second().cast(pl.Float64)).to_numpy())
+    np.testing.assert_allclose(ReplayDemand(model, bundle, seed=0).day(day).t_s, expected)
