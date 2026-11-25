@@ -61,7 +61,7 @@ def test_build_and_load(config_path, tmp_path):
     manifest = build_bundle(BuildConfig.from_yaml(config_path), out, argv=["test"])
     b = load_bundle(out, verify_hashes=True)
     assert b.scenario["id"] == "test-2024" and b.scenario["schema_version"] == SCHEMA_VERSION
-    assert b.scenario["components"] == ["network", "stations", "trips"]
+    assert b.scenario["components"] == ["demand", "network", "stations", "trips"]
     assert "trips/2024-07.parquet" in manifest["outputs"] and "network/bike_dist.npy" in manifest["outputs"]
     assert len(manifest["inputs"]) == 5 and manifest["command"] == ["test"]
     assert manifest["versions"]["bss-scenario"]
@@ -99,6 +99,10 @@ def test_cli_build_and_check(config_path, tmp_path, capsys):
     out = tmp_path / "b"
     assert cli.main(["build", str(config_path), "--out", str(out)]) == 0
     assert "bundle 'test-2024' written" in capsys.readouterr().out
+    assert cli.main(["check", str(out)]) == 0
+    assert cli.main(["demand", str(out)]) == 0          # rebuild the demand component in place
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["rebuilt"][0]["component"] == "demand"
     assert cli.main(["check", str(out)]) == 0
     (out / "scenario.yaml").write_text("schema_version: 0\n")
     assert cli.main(["check", str(out)]) == 1

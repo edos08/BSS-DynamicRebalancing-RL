@@ -45,8 +45,8 @@ GAMMA = 1.0
 @dataclass(frozen=True)
 class ShapeConfig:
     scheme: str = "day_types"
-    alpha: float = 4.0
-    beta: float = 8.0
+    alpha: float = 1024.0  # chosen on Cambridge Apr-Nov 2024 held-out days (#80)
+    beta: float = 512.0
     holidays_as_sunday: bool = True
 
     def __post_init__(self) -> None:

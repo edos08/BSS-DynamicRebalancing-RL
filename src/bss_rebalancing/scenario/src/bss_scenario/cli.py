@@ -52,6 +52,10 @@ def build_parser() -> argparse.ArgumentParser:
                           help="metres; walking neighbours are stored up to this radius")
     networks.set_defaults(func=_cmd_networks)
 
+    dem = sub.add_parser("demand", help="(re)fit the demand model of an existing bundle (held-out selection)")
+    dem.add_argument("bundle", type=Path)
+    dem.set_defaults(func=_cmd_demand)
+
     st_ = sub.add_parser("stations", help="build the stations table (capacity from GBFS, nearest bike node)")
     st_.add_argument("--trips", required=True, type=Path, help="directory with cleaned trips YYYY-MM.parquet")
     st_.add_argument("--boundary", required=True, type=Path, help="city boundary GeoJSON")
@@ -131,6 +135,23 @@ def _cmd_networks(args: argparse.Namespace) -> int:
 
     report = build_networks(args.bike, args.drive, args.out, args.walk_radius_max)
     print(json.dumps({k: report[k] for k in ("bike", "drive", "timings_s", "files_mb")}, indent=2))
+    return 0
+
+
+def _cmd_demand(args: argparse.Namespace) -> int:
+    import json
+
+    from bss_scenario.bundle import load_bundle, rebuild_component
+
+    rebuild_component(args.bundle, "demand", argv=["bss-scenario", *sys.argv[1:]])
+    load_bundle(args.bundle, verify_hashes=True)
+    report = json.loads((args.bundle / "demand" / "demand_report.json").read_text())
+    print(json.dumps({k: report[k] for k in ("chosen", "expected_trips_per_day")}, indent=2))
+    for row in report["selection"][:8]:
+        if row["loglik_per_trip"] is None:
+            continue
+        print(f"  {row['scheme']:16s} alpha={row['alpha']:>7} beta={row['beta']:>7}  "
+              f"loglik/trip={row['loglik_per_trip']:.4f}  delta={row['delta_vs_best']:.4f}")
     return 0
 
 

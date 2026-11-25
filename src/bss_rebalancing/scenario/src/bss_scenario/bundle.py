@@ -7,9 +7,10 @@ A bundle is a directory the simulator only reads::
     ├── manifest.json        inputs (with SHA-256), package versions, command line, outputs (SHA-256)
     ├── trips/               YYYY-MM.parquet + cleaning_report.json         (bss-scenario trips)
     ├── network/             nodes, edges, distance/time matrices, ...      (bss-scenario networks)
-    └── stations/            stations.parquet + stations_report.json        (bss-scenario stations)
+    ├── stations/            stations.parquet + stations_report.json        (bss-scenario stations)
+    └── demand/              places, volume, OD shape (+ ride time, spreading)  (bss-scenario demand)
 
-Demand (M2) and traffic congestion (#57) are added as further components with the same rules.
+Traffic congestion (#57) is added as a further component with the same rules.
 
 Rules: no pickles (Parquet, NumPy ``.npy``/``.npz``, JSON, YAML only); ``schema_version`` is
 checked on load; every output file's SHA-256 is recorded and can be verified.
@@ -40,6 +41,8 @@ COMPONENT_FILES: dict[str, tuple[str, ...]] = {
                 "network/bike_walk_nbrs.npz", "network/drive_nodes.parquet", "network/drive_edges.parquet",
                 "network/drive_time.npy", "network/bike_to_drive.npz", "network/network_report.json"),
     "stations": ("stations/stations.parquet", "stations/stations_report.json"),
+    "demand": ("demand/places.parquet", "demand/volume.parquet", "demand/volume.json", "demand/shape.npz",
+               "demand/demand_report.json"),
 }
 
 
@@ -59,6 +62,7 @@ class BuildConfig:
     min_duration_s: float = 60.0
     max_duration_s: float = 10800.0
     walk_radius_max_m: float = 800.0
+    demand_seed: int = 2024
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> BuildConfig:
@@ -80,6 +84,7 @@ class BuildConfig:
             min_duration_s=float(opts.get("min_duration_s", cls.min_duration_s)),
             max_duration_s=float(opts.get("max_duration_s", cls.max_duration_s)),
             walk_radius_max_m=float(opts.get("walk_radius_max_m", cls.walk_radius_max_m)),
+            demand_seed=int(opts.get("demand_seed", cls.demand_seed)),
         )
 
 
@@ -108,6 +113,7 @@ def _input_files(config: BuildConfig) -> list[Path]:
 
 def build_bundle(config: BuildConfig, out: str | Path, argv: list[str] | None = None) -> dict:
     """Build trips, networks and stations into ``out`` and write ``scenario.yaml`` and ``manifest.json``."""
+    from bss_scenario.demand.build import DemandConfig, build_demand
     from bss_scenario.network import Projection, build_networks
     from bss_scenario.stations import build_stations, stations_report
     from bss_scenario.trips import CleaningConfig, clean_trips
@@ -131,15 +137,12 @@ def build_bundle(config: BuildConfig, out: str | Path, argv: list[str] | None = 
     stations.write_parquet(out / "stations" / "stations.parquet")
     (out / "stations" / "stations_report.json").write_text(json.dumps(stations_report(stations), indent=2) + "\n")
 
-    scenario = {
-        "id": config.id,
-        "schema_version": SCHEMA_VERSION,
-        "timezone": config.timezone,
-        "slot_minutes": config.slot_minutes,
-        "fit_period": list(config.fit_period),
-        "components": sorted(COMPONENT_FILES),
-        "projection": net_report["projection"],
-    }
+    scenario = _scenario(config, net_report["projection"], ["network", "stations", "trips"])
+    (out / "scenario.yaml").write_text(yaml.safe_dump(scenario, sort_keys=False))
+    build_demand(out, DemandConfig(fit_period=tuple(dt.date.fromisoformat(d) for d in config.fit_period),
+                                   seed=config.demand_seed))
+
+    scenario = _scenario(config, net_report["projection"], sorted(COMPONENT_FILES))
     (out / "scenario.yaml").write_text(yaml.safe_dump(scenario, sort_keys=False))
     outputs = {str(p.relative_to(out)): sha256(p) for p in sorted(out.rglob("*"))
                if p.is_file() and p.name != "manifest.json"}
@@ -154,6 +157,42 @@ def build_bundle(config: BuildConfig, out: str | Path, argv: list[str] | None = 
         "outputs": outputs,
     }
     (out / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    return manifest
+
+
+def _scenario(config: BuildConfig, projection: dict, components: list[str]) -> dict:
+    return {
+        "id": config.id,
+        "schema_version": SCHEMA_VERSION,
+        "timezone": config.timezone,
+        "slot_minutes": config.slot_minutes,
+        "fit_period": list(config.fit_period),
+        "components": components,
+        "projection": projection,
+    }
+
+
+def rebuild_component(root: str | Path, component: str, argv: list[str] | None = None) -> dict:
+    """Rebuild one component of an existing bundle (currently ``demand``) and refresh the metadata."""
+    from bss_scenario.demand.build import DemandConfig, build_demand
+
+    root = Path(root)
+    bundle = load_bundle(root)
+    if component != "demand":
+        raise ValueError(f"cannot rebuild {component!r} alone; run bss-scenario build")
+    seed = bundle.manifest.get("config", {}).get("demand_seed", BuildConfig.demand_seed)
+    build_demand(root, DemandConfig(fit_period=tuple(dt.date.fromisoformat(d) for d in bundle.scenario["fit_period"]),
+                                    seed=seed))
+    scenario = dict(bundle.scenario)
+    scenario["components"] = sorted(set(scenario["components"]) | {component})
+    (root / "scenario.yaml").write_text(yaml.safe_dump(scenario, sort_keys=False))
+    manifest = dict(bundle.manifest)
+    manifest.setdefault("rebuilt", []).append({
+        "component": component, "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+        "command": argv if argv is not None else sys.argv, "versions": _versions()})
+    manifest["outputs"] = {str(p.relative_to(root)): sha256(p) for p in sorted(root.rglob("*"))
+                           if p.is_file() and p.name != "manifest.json"}
+    (root / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
     return manifest
 
 
