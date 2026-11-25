@@ -42,7 +42,7 @@ COMPONENT_FILES: dict[str, tuple[str, ...]] = {
                 "network/drive_time.npy", "network/bike_to_drive.npz", "network/network_report.json"),
     "stations": ("stations/stations.parquet", "stations/stations_report.json"),
     "demand": ("demand/places.parquet", "demand/volume.parquet", "demand/volume.json", "demand/shape.npz",
-               "demand/demand_report.json"),
+               "demand/ride_time.npz", "demand/demand_report.json"),
 }
 
 
@@ -177,7 +177,7 @@ def rebuild_component(root: str | Path, component: str, argv: list[str] | None =
     from bss_scenario.demand.build import DemandConfig, build_demand
 
     root = Path(root)
-    bundle = load_bundle(root)
+    bundle = load_bundle(root, skip=frozenset({component}))
     if component != "demand":
         raise ValueError(f"cannot rebuild {component!r} alone; run bss-scenario build")
     seed = bundle.manifest.get("config", {}).get("demand_seed", BuildConfig.demand_seed)
@@ -210,8 +210,11 @@ class Bundle:
         return self.root / rel
 
 
-def load_bundle(root: str | Path, verify_hashes: bool = False) -> Bundle:
-    """Open a bundle: check ``schema_version``, required component files, file types and (optionally) hashes."""
+def load_bundle(root: str | Path, verify_hashes: bool = False, skip: frozenset[str] = frozenset()) -> Bundle:
+    """Open a bundle: check ``schema_version``, required component files, file types and (optionally) hashes.
+
+    Components in ``skip`` are not checked for completeness (used when rebuilding them).
+    """
     root = Path(root)
     try:
         scenario = yaml.safe_load((root / "scenario.yaml").read_text())
@@ -223,6 +226,8 @@ def load_bundle(root: str | Path, verify_hashes: bool = False) -> Bundle:
         raise BundleError(f"{root}: schema_version {version}, this bss-scenario reads {SCHEMA_VERSION}; "
                           "rebuild the bundle or use a matching version")
     for component in scenario.get("components", []):
+        if component in skip:
+            continue
         if component not in COMPONENT_FILES:
             raise BundleError(f"{root}: unknown component {component!r}")
         missing = [f for f in COMPONENT_FILES[component] if not (root / f).exists()]
