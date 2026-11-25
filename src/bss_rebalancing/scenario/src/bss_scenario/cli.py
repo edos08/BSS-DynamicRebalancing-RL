@@ -18,6 +18,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     sub = parser.add_subparsers(dest="command", metavar="<command>")
 
+    build = sub.add_parser("build", help="build a complete scenario bundle from a YAML config")
+    build.add_argument("config", type=Path, help="bundle config YAML (e.g. configs/scenarios/cambridge-2024.yaml)")
+    build.add_argument("--out", required=True, type=Path, help="bundle directory to write")
+    build.set_defaults(func=_cmd_build)
+
+    check = sub.add_parser("check", help="validate a bundle (schema version, components, file types, hashes)")
+    check.add_argument("bundle", type=Path)
+    check.add_argument("--no-hashes", action="store_true", help="skip SHA-256 verification")
+    check.set_defaults(func=_cmd_check)
+
     trips = sub.add_parser(
         "trips",
         help="clean raw BlueBikes trip CSVs into monthly Parquet tables",
@@ -149,6 +159,32 @@ def _cmd_traffic_sample(args: argparse.Namespace) -> int:
     sample = build_od_sample(args.graph, args.out, config)
     print(summarise(sample, config.bands_m))
     print(f"{sample.height} pairs written to {args.out}")
+    return 0
+
+
+def _cmd_build(args: argparse.Namespace) -> int:
+    import time
+
+    from bss_scenario.bundle import BuildConfig, build_bundle, load_bundle
+
+    started = time.perf_counter()
+    manifest = build_bundle(BuildConfig.from_yaml(args.config), args.out, argv=["bss-scenario", *sys.argv[1:]])
+    load_bundle(args.out, verify_hashes=True)
+    print(f"bundle {manifest['bundle_id']!r} written to {args.out}: {len(manifest['outputs'])} files, "
+          f"{time.perf_counter() - started:.1f} s")
+    return 0
+
+
+def _cmd_check(args: argparse.Namespace) -> int:
+    from bss_scenario.bundle import BundleError, load_bundle
+
+    try:
+        bundle = load_bundle(args.bundle, verify_hashes=not args.no_hashes)
+    except BundleError as exc:
+        print(f"invalid bundle: {exc}", file=sys.stderr)
+        return 1
+    print(f"ok: {bundle.scenario['id']} (schema v{bundle.scenario['schema_version']}, "
+          f"components {', '.join(bundle.scenario['components'])})")
     return 0
 
 

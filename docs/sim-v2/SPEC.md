@@ -86,32 +86,36 @@ Rules:
 
 ## 4. Scenario bundle
 
-A scenario is a directory produced by `bss-scenario build`; the simulator only reads it.
+A scenario is a directory produced by `bss-scenario build <config.yaml> --out <dir>`
+(config example: `configs/scenarios/cambridge-2024.yaml`); the simulator only reads it.
+`bss-scenario check <dir>` validates it.
 
 ```
-scenarios/cambridge-2024/
-├── scenario.yaml              # id, schema_version, source, fit period, timezone, slot length, hashes
-├── manifest.json              # how it was built (inputs, versions, command line)
+data/scenarios/cambridge-2024/
+├── scenario.yaml              # id, schema_version, timezone, slot length, fit period, components, projection
+├── manifest.json              # inputs and outputs with SHA-256, package versions, command line, config
+├── trips/
+│   ├── 2024-MM.parquet        # cleaned recorded trips, one file per local start month (flags, city ends)
+│   └── cleaning_report.json
 ├── network/
-│   ├── bike_nodes.parquet     # node_idx, osm_id, lat, lon, x, y (projected metres)
-│   ├── bike_dist.npy          # float32 [N, N] shortest-path metres on the (directed) bike network
-│   ├── bike_walk_nbrs.npz     # CSR: for each node, nodes within the walking radius, sorted by distance
-│   ├── drive_nodes.parquet
+│   ├── bike_nodes.parquet     # node_idx, osm_id, lat, lon, x, y (metres, local projection shared by both networks)
+│   ├── bike_edges.parquet     # u, v, length_m, highway, maxspeed, oneway, name
+│   ├── bike_dist.npy          # float32 [N, N] directed shortest paths on the bike network (m)
+│   ├── bike_walk_nbrs.npz     # CSR walking neighbours (undirected) up to walk_radius_max_m, sorted by distance
+│   ├── drive_nodes.parquet    # drive network without busways
+│   ├── drive_edges.parquet    # + speed_kmh, speed_source, freeflow_s
 │   ├── drive_time.npy         # float32 [M, M] free-flow driving time (s), one-way streets respected
-│   ├── drive_congestion.parquet  # factor per (weekday, hour): time = free_flow × factor
-│   └── bike_to_drive.npy      # int32 [N]: nearest drive node of each bike node (+ distance)
-├── stations/stations.parquet  # station_id, name, lat, lon, capacity, bike_node
-├── demand/
-│   ├── shape.npz              # sparse OD rates per slot (station level, incl. EXTERNAL)
-│   ├── volume.parquet         # per date: observed volume factor; monthly levels; day-noise params
-│   ├── spread.npz             # CSR: station -> distribution over bike nodes (dockless spreading)
-│   └── durations.parquet      # empirical trip speed / duration model parameters
-└── trips/
-    └── 2024-MM.parquet        # cleaned recorded trips for replay (one file per month)
+│   ├── bike_to_drive.npz      # node: nearest drive node of each bike node; dist_m
+│   └── network_report.json
+├── stations/
+│   ├── stations.parquet       # station_id, name, lat, lon, in_city, usage, capacity (+source), bike_node
+│   └── stations_report.json
+├── traffic/                   # (#57) congestion factors per day type x hour x road class
+└── demand/                    # (M2) shape, volume, spreading, durations
 ```
 
-Sizes for Cambridge (5,017 bike nodes, 1,993 drive nodes, 219 stations):
-`bike_dist` 100 MB, `drive_time` 16 MB, demand shape ≈ 219² × 168 slots ≈ 8 M values (much less sparse-stored).
+Sizes for Cambridge 2024 (bike network 4,896 nodes, drive network 1,942 nodes, 91 stations inside
+the city out of 512 on trips touching it): 182 MB, built in 15 s.
 No N² demand matrices are ever materialised.
 
 `schema_version` is checked at load; a mismatch is an error with a clear message.
