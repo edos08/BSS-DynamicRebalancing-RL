@@ -1,0 +1,36 @@
+name: Feature
+description: A new capability or model
+labels: ["type: feature"]
+body:
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal
+      description: What should become possible, and why.
+    validations:
+      required: true
+  - type: textarea
+    id: design
+    attributes:
+      label: Design
+      description: Interfaces, data, configuration. Reference the spec section if any (`docs/sim-v2/SPEC.md §x`).
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: Acceptance criteria (tests, benchmarks, documentation).
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - scenario (bss_scenario)
+        - sim (bss_sim)
+        - gym (bss_gym)
+        - policies (bss_policies)
+        - legacy
+        - devops / CI
+    validations:
+      required: true

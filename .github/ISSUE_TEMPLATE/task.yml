@@ -1,0 +1,19 @@
+name: Task
+description: Maintenance, data work, documentation, experiments
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps
+      value: |
+        - [ ]
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
