@@ -16,6 +16,7 @@ dependencies = [
     "networkx>=3.3",
     "numpy>=2.0",
     "polars>=1.0",
+    "scipy>=1.11",
     "shapely>=2.0",
 ]
 
