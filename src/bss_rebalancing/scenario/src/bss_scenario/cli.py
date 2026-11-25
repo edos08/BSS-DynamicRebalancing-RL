@@ -34,6 +34,14 @@ def build_parser() -> argparse.ArgumentParser:
                        help="keep only trips with at least one end in the city (default) or all")
     trips.set_defaults(func=_cmd_trips)
 
+    networks = sub.add_parser("networks", help="build network tables, distance/time matrices, walking neighbours")
+    networks.add_argument("--bike", required=True, type=Path, help="bike network GraphML (OSMnx)")
+    networks.add_argument("--drive", required=True, type=Path, help="drive network GraphML (OSMnx)")
+    networks.add_argument("--out", required=True, type=Path, help="output directory (e.g. <bundle>/network)")
+    networks.add_argument("--walk-radius-max", type=float, default=800.0,
+                          help="metres; walking neighbours are stored up to this radius")
+    networks.set_defaults(func=_cmd_networks)
+
     traffic = sub.add_parser("traffic", help="truck travel-time data (OD sample, routing queries, fit)")
     traffic_sub = traffic.add_subparsers(dest="traffic_command", metavar="<step>", required=True)
     sample = traffic_sub.add_parser("sample", help="draw the stratified OD sample for routing queries")
@@ -94,6 +102,16 @@ def _cmd_traffic_status(args: argparse.Namespace) -> int:
     from bss_scenario.traffic import tomtom
 
     print(json.dumps(tomtom.status(pl.read_parquet(args.od), args.cache), indent=2))
+    return 0
+
+
+def _cmd_networks(args: argparse.Namespace) -> int:
+    import json
+
+    from bss_scenario.network import build_networks
+
+    report = build_networks(args.bike, args.drive, args.out, args.walk_radius_max)
+    print(json.dumps({k: report[k] for k in ("bike", "drive", "timings_s", "files_mb")}, indent=2))
     return 0
 
 

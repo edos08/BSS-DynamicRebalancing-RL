@@ -83,15 +83,27 @@ def _bool(value) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes")
 
 
-def load_graphml(path: str | Path, projection: Projection | None = None) -> Network:
+def load_graphml(
+    path: str | Path,
+    projection: Projection | None = None,
+    exclude_highways: frozenset[str] | set[str] = frozenset(),
+) -> Network:
     """Read a GraphML street network and return its largest strongly connected component.
 
     Pass the same ``projection`` to every network of a bundle so their ``x``/``y`` agree; by default
-    it is centred on this network.
+    it is centred on this network. Edges whose main road class is in ``exclude_highways`` (e.g.
+    busways for vans) are removed before the connected component is taken.
     """
     graph = nx.read_graphml(path)
     if not graph.is_directed():
         raise ValueError(f"{path}: expected a directed graph")
+    if exclude_highways:
+        if graph.is_multigraph():
+            drop = [(u, v, k) for u, v, k, d in graph.edges(keys=True, data=True)
+                    if main_highway(d.get("highway")) in exclude_highways]
+        else:
+            drop = [(u, v) for u, v, d in graph.edges(data=True) if main_highway(d.get("highway")) in exclude_highways]
+        graph.remove_edges_from(drop)
     largest = max(nx.strongly_connected_components(graph), key=len)
     dropped = graph.number_of_nodes() - len(largest)
 
