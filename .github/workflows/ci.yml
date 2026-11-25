@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        # The legacy RL stack pins torch==2.4.1, which ships wheels up to Python 3.12.
+        python: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: "**/pyproject.toml"
+
+      - name: Install CPU-only PyTorch
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch==2.4.1
+
+      - name: Install packages
+        run: |
+          pip install \
+            -e src/bss_rebalancing/gymnasium_env \
+            -e src/bss_rebalancing/rl_training \
+            -e src/bss_rebalancing/preprocessing \
+            -e src/bss_rebalancing/benchmark \
+            -e src/bss_rebalancing/results_webapp \
+            pytest
+
+      - name: Run tests
+        run: pytest -q
