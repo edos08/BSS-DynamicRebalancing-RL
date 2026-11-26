@@ -219,6 +219,15 @@ class Simulator:
         self._walk_speed = cfg.users.walking_speed_mps
         self._bat_lo, self._bat_hi = cfg.fleet.initial_battery
         self._req_id = 0
+        self._slot_requests: dict[int, int] = {}   # requests from the city per clock hour (seen in the app)
+        self._slot_served: dict[int, int] = {}     # ... and how many of them got a bike
+        self._ext_req: dict[int, int] = {}         # the same for requests from outside
+        self._ext_served: dict[int, int] = {}
+        P = self.scenario.demand.n_places
+        self._place_req: list[int] = [0] * P       # requests and served requests per origin place,
+        self._place_served: list[int] = [0] * P    # for the current slot (moved to the history hourly)
+        self._place_hist: dict[int, tuple[list[int], list[int]]] = {}
+        self._cur_slot = int(self.now // 3600)
         self._slot = int(self.now // 3600)
         self._rq: list[tuple] = []
         self._ri = 0
@@ -446,6 +455,15 @@ class Simulator:
 
     # ---------------------------------------------------------------------------------- loop
     def _load_slot(self, k: int) -> None:
+        if self._slot_requests.get(self._cur_slot):
+            self._place_hist[self._cur_slot] = (self._place_req, self._place_served)
+            P = len(self._place_req)
+            self._place_req, self._place_served = [0] * P, [0] * P
+        self._slot_requests[k] = 0
+        self._slot_served[k] = 0
+        self._ext_req[k] = 0
+        self._ext_served[k] = 0
+        self._cur_slot = k
         if self.demand is None:
             self._rq, self._ri, self._rn = [], 0, 0
             return
@@ -547,6 +565,7 @@ class Simulator:
             if dp == ext:
                 k.skipped_external_both += 1
                 return
+            self._ext_req[self._cur_slot] += 1
             bike = f.take_external(pref)
             if bike < 0:
                 self._fail(rid, dn, EXTERNAL_EMPTY)
@@ -555,6 +574,7 @@ class Simulator:
                 f._batt[bike] = self._ext_rng.uniform(self._bat_lo, self._bat_hi) * self.battery.range_km
             k.served += 1
             k.from_external += 1
+            self._ext_served[self._cur_slot] += 1
             self._trip_dest[bike] = dn
             self._trip_km[bike] = self._ext_km
             self._trip_req[bike] = rid
@@ -573,6 +593,8 @@ class Simulator:
             ride = 0.0 if to_ext else dist_m / self._rt_speed
         trip_km = self._ext_km if to_ext else dist_m / 1000.0
         k.city_requests += 1
+        self._slot_requests[self._cur_slot] += 1
+        self._place_req[op] += 1
         for p in self._parts.values():
             p.requests[p._g[on]] += 1
         bike, walk, reason = self.users.choose(on, pref, self.battery.need_km(trip_km), u)
@@ -581,6 +603,8 @@ class Simulator:
             return
         k.served += 1
         k.city_served += 1
+        self._slot_served[self._cur_slot] += 1
+        self._place_served[op] += 1
         k.walk_hist.add(walk)
         node = f.unpark(bike, RESERVED)
         if not to_ext:

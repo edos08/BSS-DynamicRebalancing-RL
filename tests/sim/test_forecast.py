@@ -55,7 +55,10 @@ def test_mean_departures_equal_the_model_expectation(syn):
     date = dt.date(2024, 9, 17)
     lam = m.rates[m.group(date), 8].astype(float) * m.month(date)
     W, _ = sim._fc.W("quad")
-    np.testing.assert_allclose(f.departures, lam[:-1].sum(axis=1) @ W, rtol=1e-9)
+    level, observed, expected = sim._fc.level()
+    assert observed == sum(n for s, n in sim._slot_requests.items() if s >= 2)   # last 6 h: 02:00-08:00
+    assert level == pytest.approx((observed + 50) / (expected + 50))
+    np.testing.assert_allclose(f.departures, level * lam[:-1].sum(axis=1) @ W, rtol=1e-9)
     assert f.departures.shape == (4,) and f.provider == "mean" and f.inflight_knowledge == "origin"
     np.testing.assert_allclose(f.arrivals, f.arrivals_new + f.arrivals_inflight)
 
@@ -118,3 +121,19 @@ def test_levels_run(syn, level):
     assert (f.arrivals_inflight >= 0).all() and f.arrivals_inflight.sum() > 0
     s = sim.forecast(1800, "quad", provider="sampled", samples=30)
     assert s.arrivals_inflight.shape == (30, 4)
+
+
+def test_level_adapts_to_observed_demand(syn):
+    lo = make(syn, demand={"generator": "poisson"})
+    lo.run(At(12 * 3600))
+    lo.forecast(1800, "quad")
+    lv, obs, exp = lo._fc.level()
+    assert exp > 100 and 0.5 < lv < 1.5
+    # the same model, but every request counted twice: the level estimate follows
+    for k in lo._slot_requests:
+        lo._slot_requests[k] *= 2
+    lo._fc._level = None
+    lv2, obs2, _ = lo._fc.level()
+    assert obs2 == 2 * obs and lv2 > 1.6 * lv
+    draws = np.array([lo._fc.sample_level(np.random.default_rng(i)) for i in range(400)])
+    assert draws.mean() == pytest.approx(lv2, rel=0.03)

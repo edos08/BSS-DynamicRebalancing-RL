@@ -198,10 +198,13 @@ class InfoConfig:
 
     inflight_knowledge: str = "origin"   # none | count | origin | destination (oracle)
     allow_oracle: bool = False           # required for destination knowledge and OracleForecast
+    level_window_s: float = 21600.0      # forecasts adapt the demand level to the requests of the last 6 h
+    level_prior: float = 50.0            # ... shrunk towards the model's level with this many requests
 
     def __post_init__(self):
         _check(self.inflight_knowledge in ("none", "count", "origin", "destination"),
                f"info.inflight_knowledge: unknown {self.inflight_knowledge!r}")
+        _check(self.level_window_s >= 0 and self.level_prior > 0, "info.level_window_s >= 0 and level_prior > 0")
         _check(self.inflight_knowledge != "destination" or self.allow_oracle,
                "info.inflight_knowledge 'destination' is an oracle: set info.allow_oracle: true (ablations only)")
 
