@@ -1,0 +1,138 @@
+"""Performance benchmarks and budget (issue #105, spec §12).
+
+```
+python -m bss_sim.bench --make-synthetic /tmp/synth        # once: Cambridge-size synthetic bundle
+python -m bss_sim.bench /tmp/synth --check --json bench.json
+python -m bss_sim.bench data/scenarios/cambridge-2024      # real bundle (numbers for the report)
+```
+
+Measured, single core, default configuration (dockless, 800 bikes, logging off):
+
+* ``load_s``: ``Simulator.from_scenario`` (budget 2 s);
+* ``week_s``: one simulated week from Monday 00:00, best of ``--repeat`` runs (budget 0.5 s);
+* ``peak_mb``: peak resident memory of this process after loading one simulator and running the
+  weeks above (budget 600 MB; measured before the other benchmarks create more simulators);
+* ``week_docked_s``, ``week_partition_s``: docked mode (800 bikes, or 44 % of the docks if fewer,
+  as in Cambridge), and dockless with a 300 m-like grid partition (reported, no budget);
+* ``threads_speedup``: ``--threads`` simulators in parallel threads vs one after the other
+  (reported; > 1 only on free-threaded Python).
+
+The truck benchmark (1 truck, random commands every ~5 min, budget 1 s) comes with M4.
+``--check`` exits with status 1 when a budget is exceeded.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import platform
+import sys
+import sysconfig
+import threading
+import time
+from pathlib import Path
+
+import numpy as np
+
+from bss_sim.config import SimConfig
+from bss_sim.engine import TimeLimit
+from bss_sim.simulator import Simulator
+
+BUDGET = {"load_s": 2.0, "week_s": 0.5, "peak_mb": 600.0}
+START = "2024-09-16T00:00"
+WEEK = 7 * 86400.0
+
+
+def _peak_mb() -> float:
+    try:
+        import resource
+    except ImportError:  # Windows
+        return float("nan")
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    return rss / 1024.0 if sys.platform != "darwin" else rss / 1024.0 / 1024.0
+
+
+def _week(sim: Simulator, seed: int) -> float:
+    sim.reset(seed=seed, start=START)
+    t = time.perf_counter()
+    sim.run(TimeLimit(WEEK))
+    return time.perf_counter() - t
+
+
+def grid_partition(sim: Simulator, cells: int = 500) -> np.ndarray:
+    """A partition with about ``cells`` groups of consecutive node ids (stands in for a 300 m grid)."""
+    n = sim.scenario.n_nodes
+    return (np.arange(n) * cells // n).astype(np.int64)
+
+
+def run(bundle: str | Path, repeat: int = 3, threads: int = 4) -> dict:
+    out: dict = {"bundle": str(bundle), "python": platform.python_version(),
+                 "free_threaded": bool(sysconfig.get_config_var("Py_GIL_DISABLED")),
+                 "numpy": np.__version__, "machine": platform.machine(), "repeat": repeat}
+    t = time.perf_counter()
+    sim = Simulator.from_scenario(bundle)
+    out["load_s"] = time.perf_counter() - t
+    out["week_s"] = min(_week(sim, s) for s in range(repeat))
+    k = sim.kpis()
+    out["requests_per_week"] = k["requests"]
+    out["us_per_request"] = out["week_s"] / max(k["requests"], 1) * 1e6
+    out["peak_mb"] = _peak_mb()
+
+    docks = int(sim.scenario.station_capacity.sum())
+    size = min(SimConfig().fleet.size, int(0.44 * docks))  # Cambridge: 800 bikes for 1,824 docks
+    docked = Simulator.from_scenario(bundle, SimConfig.from_dict({"mode": "docked", "fleet": {"size": size}}))
+    out["week_docked_s"] = min(_week(docked, s) for s in range(repeat))
+    sim.add_partition("grid", grid_partition(sim))
+    out["week_partition_s"] = min(_week(sim, s) for s in range(repeat))
+
+    if threads > 1:
+        sims = [Simulator.from_scenario(bundle) for _ in range(threads)]
+        t = time.perf_counter()
+        for i, s in enumerate(sims):
+            _week(s, i)
+        serial = time.perf_counter() - t
+        t = time.perf_counter()
+        ts = [threading.Thread(target=_week, args=(s, i)) for i, s in enumerate(sims)]
+        for th in ts:
+            th.start()
+        for th in ts:
+            th.join()
+        parallel = time.perf_counter() - t
+        out["threads"] = threads
+        out["threads_speedup"] = serial / parallel
+    out["budget"] = BUDGET
+    out["over_budget"] = [k for k, v in BUDGET.items() if out[k] > v]
+    return out
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("bundle", nargs="?", type=Path)
+    ap.add_argument("--make-synthetic", type=Path, metavar="DIR", help="write a synthetic bundle and exit")
+    ap.add_argument("--repeat", type=int, default=3)
+    ap.add_argument("--threads", type=int, default=4)
+    ap.add_argument("--json", type=Path, help="write the results here")
+    ap.add_argument("--check", action="store_true", help="exit 1 if a budget is exceeded")
+    args = ap.parse_args(argv)
+    if args.make_synthetic:
+        from bss_sim.synthetic import make_bundle
+        t = time.perf_counter()
+        make_bundle(args.make_synthetic)
+        print(f"synthetic bundle written to {args.make_synthetic} in {time.perf_counter() - t:.1f} s")
+        return 0
+    if args.bundle is None:
+        ap.error("bundle required (or --make-synthetic DIR)")
+    res = run(args.bundle, args.repeat, args.threads)
+    text = json.dumps(res, indent=2)
+    print(text)
+    if args.json:
+        args.json.parent.mkdir(parents=True, exist_ok=True)
+        args.json.write_text(text + "\n")
+    if args.check and res["over_budget"]:
+        print(f"over budget: {', '.join(res['over_budget'])}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
