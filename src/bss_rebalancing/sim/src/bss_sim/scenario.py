@@ -38,6 +38,8 @@ class Scenario:
     bike_to_drive: np.ndarray     # int32 [N] nearest drive node of each bike node
     bike_to_drive_m: np.ndarray   # float32 [N] distance to it
     road_classes: tuple[str, ...]
+    bike_x: np.ndarray            # float64 [N] metres (local projection)
+    bike_y: np.ndarray
 
     @property
     def n_drive(self) -> int:
@@ -77,7 +79,7 @@ class Scenario:
             raise ScenarioError(f"{root}: schema_version {version}, bss_sim reads {SCHEMA_VERSION}; rebuild the bundle")
         for rel in ("network/bike_walk_nbrs.npz", "network/bike_dist.npy", "stations/stations.npz",
                     "network/drive_time.npy", "network/drive_dist.npy", "network/drive_nodes.npz",
-                    "network/drive_time_by_class.npy", "network/bike_to_drive.npz",
+                    "network/drive_time_by_class.npy", "network/bike_to_drive.npz", "network/bike_nodes.npz",
                     "demand/shape.npz", "demand/spread.npz", "demand/volume.json", "demand/ride_time.npz"):
             if not (root / rel).exists():
                 raise ScenarioError(f"{root}: missing {rel}; rebuild the bundle with bss-scenario build")
@@ -91,12 +93,14 @@ class Scenario:
         with np.load(root / "network" / "drive_nodes.npz") as z:
             d_lat, d_lon = z["lat"].astype(np.float64), z["lon"].astype(np.float64)
             classes = tuple(str(c) for c in z["road_classes"])
+        with np.load(root / "network" / "bike_nodes.npz") as z:
+            bx, by = z["x"].astype(np.float64), z["y"].astype(np.float64)
         with np.load(root / "network" / "bike_to_drive.npz") as z:
             b2d, b2d_m = z["node"].astype(np.int32), z["dist_m"].astype(np.float32)
         return cls(root, manifest.get("bundle_id", root.name), mode, len(indptr) - 1, indptr, indices, dist, rmax,
                    demand.bike_dist, st_node, st_cap, demand,
                    np.load(root / "network" / "drive_time.npy", mmap_mode="r"),
-                   np.load(root / "network" / "drive_dist.npy", mmap_mode="r"), d_lat, d_lon, b2d, b2d_m, classes)
+                   np.load(root / "network" / "drive_dist.npy", mmap_mode="r"), d_lat, d_lon, b2d, b2d_m, classes, bx, by)
 
     def departure_weights(self) -> np.ndarray:
         """Expected departures per node over a typical week (initial distribution)."""
