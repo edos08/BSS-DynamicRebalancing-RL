@@ -21,6 +21,9 @@ per slot so that it reaches ~0.1 after ``exploration_time`` of the training), wi
   The best one by city service level is kept as ``models/model_best.pt``: DQN performance
   oscillates during training, so the final weights are often not the best.
 
+**Weights & Biases** (issue #171, optional): ``--wandb`` logs the configuration, every episode and
+every validation, and uploads the best, final and latest models as versioned artifacts.
+
 Results use the legacy layout, so ``bss-results-webapp`` shows them next to the legacy runs:
 ``<results>/run_NNN/training/episode_NNN/`` (scalars, per-3 h timeslot metrics, step data, zone
 graph with per-zone means), the greedy evaluation on held-out weeks as
@@ -46,6 +49,7 @@ from rl_training.agents import DQNAgent
 from rl_training.checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint
 from rl_training.memory import ReplayBuffer
 from rl_training.results import EpisodeResults, ResultsManager
+from rl_training.tracking import Tracker
 from rl_training.utils import set_seed
 
 PARAMS = {"gamma": 0.95, "lr": 1e-4, "batch_size": 64, "buffer": int(1e5), "epsilon_start": 1.0,
@@ -207,6 +211,10 @@ def main(argv=None) -> int:
                     help="stop after N episodes in this invocation (resume later with --resume)")
     ap.add_argument("--val-every", type=int, default=5, help="validate the greedy policy every N episodes (0: never)")
     ap.add_argument("--val-date", default=None, help="week used for validation (default: the first --eval-dates)")
+    ap.add_argument("--wandb", action="store_true", help="track the run with Weights & Biases")
+    ap.add_argument("--wandb-project", default="bss-rebalancing")
+    ap.add_argument("--wandb-entity", default=None)
+    ap.add_argument("--wandb-mode", default="online", choices=["online", "offline"])
     args = ap.parse_args(argv)
     params = {**PARAMS, "gamma": args.gamma}
     set_seed(args.seed)
@@ -243,6 +251,14 @@ def main(argv=None) -> int:
                     "env": "bss_gym.GridZoneEnv", "zones": env.n_zones, "agent_len": env.agent_len, "smdp": True},
             reward_params=vars(env.reward_cfg))
 
+    config = {**params, **{k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+              "env": "bss_gym.GridZoneEnv", "zones": env.n_zones, "agent_len": env.agent_len, "smdp": True,
+              "reward": vars(env.reward_cfg)}
+    tracker = Tracker(args.wandb, project=args.wandb_project, entity=args.wandb_entity,
+                      name=f"grid-run{args.run_id:03d}", config=config, run_dir=rm.run_dir,
+                      run_id=state["extra"].get("wandb_id") if args.resume else None, mode=args.wandb_mode,
+                      tags=("GridZoneEnv", args.mode), group="GridZoneEnv")
+
     def on_slot():
         slots["n"] += 1
         agent.update_epsilon()
@@ -260,6 +276,8 @@ def main(argv=None) -> int:
         print(f"ep {ep:3d} return {s['return']:9.1f} served {s['city_service_level']:.3f} moved {s['bikes_moved']:5d} "
               f"invalid {s['invalid']:5d}/{s['decisions']:5d} eps {s['epsilon']:.3f} loss {s['loss']:.4f} "
               f"wall {s['wall_s']:.0f}s", flush=True)
+        tracker.log({f"train/{k}": v for k, v in s.items()} | {"train/mean_daily_failures": res.mean_daily_failures,
+                    "train/buffer": len(agent.replay_buffer)}, step=ep)
         if (ep + 1) % args.save_every == 0 or ep == args.episodes - 1:
             agent.save_model(rm.models_path / f"model_episode_{ep:03d}.pt")
         if args.val_every and (ep + 1) % args.val_every == 0:
@@ -272,34 +290,48 @@ def main(argv=None) -> int:
             ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False, mode="validation",
                            val_tag=f"episode_{ep:03d}").save_episode(vres)
             improved = vs["city_service_level"] > best
+            tracker.log({f"val/{k}": vs[k] for k in ("city_service_level", "failed", "return", "bikes_moved",
+                                                       "invalid", "truck_km")}, step=ep)
             if improved:
                 best = vs["city_service_level"]
                 agent.save_model(rm.models_path / "model_best.pt")
+                tracker.log_model(rm.models_path / "model_best.pt", ["best", f"episode-{ep}"],
+                                  {"episode": ep, "val_city_service_level": best, "val_date": val_date})
+                tracker.summary({"best/val_city_service_level": best, "best/episode": ep})
             print(f"val ep {ep:3d} ({val_date}): served {vs['city_service_level']:.4f} failures {vs['failed']} "
                   f"{'NEW BEST' if improved else f'best {best:.4f}'}", flush=True)
         if args.checkpoint_every and (ep + 1) % args.checkpoint_every == 0:
-            save_checkpoint(ckpt_dir, agent, {"slots": slots["n"], "best_val": best}, episode=ep,
-                            buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
+            path = save_checkpoint(ckpt_dir, agent, {"slots": slots["n"], "best_val": best, "wandb_id": tracker.id},
+                                   episode=ep, buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
+            if args.val_every and (ep + 1) % args.val_every == 0:
+                tracker.log_model(path, ["latest", f"episode-{ep}"], {"episode": ep}, kind="checkpoint")
     if stop_at < args.episodes:
         print(f"stopped after episode {stop_at - 1}; continue with --resume", flush=True)
+        tracker.finish()
         return 0
     agent.save_model(rm.models_path / "model_final.pt")
+    tracker.log_model(rm.models_path / "model_final.pt", ["final"], {"episode": args.episodes - 1})
 
     # greedy evaluation on held-out weeks, as the webapp's validation view
     eval_env = make_env(args.bundle, args.eval_dates, args.days, sim_config, args.cell_m)
     val = ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False, mode="validation",
                          val_tag=f"final_episode_{args.episodes - 1:03d}")
     i = 0
+    final_eval = []
     for d, day in enumerate(args.eval_dates):
         eval_env.start_dates = (day,)
         for s_ in range(args.eval_seeds):
             res, s = run_episode(eval_env, agent, seed=10_000 + 100 * d + s_, device=args.device, learn=False,
                                  params=params, cell_m=args.cell_m, episode=i, mode="validation")
             val.save_episode(res)
+            final_eval.append(s)
             print(f"eval {day} seed {s_}: served {s['city_service_level']:.3f} moved {s['bikes_moved']} "
                   f"failures {s['failed']}", flush=True)
             i += 1
     val.save_run_summary()
+    tracker.summary({"eval/city_service_level": float(np.mean([e["city_service_level"] for e in final_eval])),
+                     "eval/failed": float(np.mean([e["failed"] for e in final_eval]))})
+    tracker.finish()
     return 0
 
 

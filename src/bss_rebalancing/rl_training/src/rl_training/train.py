@@ -25,6 +25,7 @@ from gymnasium_env.envs.fully_dynamic_env import EnvDefaults, RewardComponents
 
 from rl_training.agents import DQNAgent
 from rl_training.checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint
+from rl_training.tracking import Tracker
 from rl_training.memory import ReplayBuffer
 from rl_training.results import ResultsManager, EpisodeResults
 from rl_training.logging_config import init_logging, LoggingConfig, get_logger
@@ -232,6 +233,10 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Do not save the replay buffer in checkpoints (a resume then starts with an empty buffer).'
     )
+    parser.add_argument('--wandb', action='store_true', help='Track the run with Weights & Biases.')
+    parser.add_argument('--wandb-project', type=str, default='bss-rebalancing')
+    parser.add_argument('--wandb-entity', type=str, default=None)
+    parser.add_argument('--wandb-mode', type=str, default='online', choices=['online', 'offline'])
     return parser
 
 
@@ -776,6 +781,7 @@ def main():
     # ------------------------------------------------------------------
     start_episode = 0
     resumed_best = float("inf")
+    wandb_id = None
     if args.resume:
         ckpt = latest_checkpoint(checkpoint_dir)
         if ckpt is None:
@@ -783,6 +789,7 @@ def main():
         state = load_checkpoint(ckpt, agent)
         start_episode = state["episode"] + 1
         resumed_best = state["extra"].get("best_val", float("inf"))
+        wandb_id = state["extra"].get("wandb_id")
         summary = results_manager.training_path / "train_summary.csv"
         if summary.exists():
             df = pd.read_csv(summary)
@@ -797,6 +804,14 @@ def main():
 
     # Best validation score tracker (lower mean_daily_failures = better)
     best_val_score = resumed_best
+
+    # Weights & Biases (issue #171): no-op unless --wandb
+    tracker = Tracker(
+        args.wandb, project=args.wandb_project, entity=args.wandb_entity, name=f"legacy-run{run_id:03d}",
+        config={**params, "data_path": data_path, "env": "gymnasium_env/FullyDynamicEnv-v0", "smdp": True,
+                "reward": {k: v for k, v in vars(RewardComponents).items() if not k.startswith('_')}},
+        run_dir=results_manager.run_dir, run_id=wandb_id, mode=args.wandb_mode, tags=("legacy",), group="legacy",
+    )
 
     # Holds the currently running validation subprocess (if any).
     # There is at most one pending validation at a time; we collect it
@@ -865,6 +880,17 @@ def main():
 
             # Save training episode results
             results_manager.save_episode(training_results)
+            demand = sum(training_dict['demand_per_timeslot'])
+            tracker.log({
+                "train/return": training_results.total_reward,
+                "train/mean_daily_failures": training_results.mean_daily_failures,
+                "train/total_failures": training_results.total_failures,
+                "train/service_level": 1.0 - training_results.total_failures / demand if demand else 0.0,
+                "train/invalid": training_results.total_invalid_actions,
+                "train/epsilon": agent.epsilon,
+                "train/mean_q": training_results.mean_q_values,
+                "train/buffer": len(agent.replay_buffer),
+            }, step=episode)
 
             if (
                     not args.one_validation
@@ -883,15 +909,20 @@ def main():
                             episode=pending_val.episode,
                             logger=logger,
                         )
+                        if val_score is not None:
+                            tracker.log({"val/mean_daily_failures": val_score}, step=pending_val.episode)
                         if val_score is not None and val_score < best_val_score:
                             prev_best = best_val_score
                             best_val_score = val_score
                             # Promote the already-saved episode snapshot — do NOT
                             # use the live agent weights (we are now one episode ahead).
-                            results_manager.promote_episode_to_best(
+                            best_path = results_manager.promote_episode_to_best(
                                 episode=pending_val.episode,
                                 score=val_score,
                             )
+                            tracker.log_model(best_path, ["best", f"episode-{pending_val.episode}"],
+                                              {"episode": pending_val.episode, "val_mean_daily_failures": val_score})
+                            tracker.summary({"best/val_mean_daily_failures": val_score, "best/episode": pending_val.episode})
                             logger.info(
                                 f"[val] Episode {pending_val.episode}: NEW BEST promoted! "
                                 f"val_score={val_score:.4f} (prev best={prev_best:.4f})"
@@ -940,8 +971,8 @@ def main():
             )
 
             if args.checkpoint_every and (episode + 1) % args.checkpoint_every == 0:
-                save_checkpoint(checkpoint_dir, agent, {"best_val": best_val_score}, episode=episode,
-                                buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
+                save_checkpoint(checkpoint_dir, agent, {"best_val": best_val_score, "wandb_id": tracker.id},
+                                episode=episode, buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
 
             gc.collect()
 
@@ -989,10 +1020,13 @@ def main():
                 if val_score is not None and val_score < best_val_score:
                     prev_best = best_val_score
                     best_val_score = val_score
-                    results_manager.promote_episode_to_best(
+                    best_path = results_manager.promote_episode_to_best(
                         episode=pending_val.episode,
                         score=val_score,
                     )
+                    tracker.log_model(best_path, ["best", f"episode-{pending_val.episode}"],
+                                      {"episode": pending_val.episode, "val_mean_daily_failures": val_score})
+                    tracker.summary({"best/val_mean_daily_failures": val_score, "best/episode": pending_val.episode})
                     logger.info(
                         f"[val] Final best: episode {pending_val.episode}, "
                         f"val_score={val_score:.4f} (prev best={prev_best:.4f})"
@@ -1004,11 +1038,16 @@ def main():
 
         # Save aggregated summaries
         results_manager.save_run_summary()
+        final_path = results_manager.models_path / "final_agent.pt"
+        agent.save_model(final_path)
+        tracker.log_model(final_path, ["final"], {"episode": int(params["num_episodes"]) - 1})
+        tracker.finish()
         logger.info("Training completed successfully")
         tbar.close()
         env.close()
     except KeyboardInterrupt:
         print("\nTraining interrupted.")
+        tracker.finish()
         if pending_val is not None and pending_val.proc.poll() is None:
             print(f"[VAL] Terminating background validation for episode {pending_val.episode}...")
             pending_val.proc.terminate()
