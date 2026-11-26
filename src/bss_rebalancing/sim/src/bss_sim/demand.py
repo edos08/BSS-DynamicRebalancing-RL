@@ -67,6 +67,11 @@ class RideTimes:
             self.levels = z["levels"]
             self.speed_q = z["speed_q"]
             self.round_q = z["round_q"]
+            self._max = float(z["max_duration_s"]) if "max_duration_s" in z.files else None
+        # Longest allowed ride: the cleaning limit on trip duration, which the fitted trips respect.
+        # The lowest speed quantile can be 0 m/s, which would make distance / speed unbounded (#138).
+        # Bundles built before the fix lack it: 3 h, the cleaning default.
+        self.max_s = self._max if self._max is not None else 10800.0
         L = len(self.levels) - 1
         self._uniform = bool(np.allclose(self.levels, np.linspace(0.0, 1.0, L + 1)))
         nb = self.speed_q.shape[1]
@@ -77,7 +82,7 @@ class RideTimes:
         return np.clip(np.searchsorted(self.bands_m, dist_m, side="right") - 1, 0, len(self.bands_m) - 2)
 
     def sample(self, dist_m: np.ndarray, kind: np.ndarray, u: np.ndarray) -> np.ndarray:
-        """Ride times (s) for uniforms ``u``; ``dist_m <= 0`` means a round trip.
+        """Ride times (s) for uniforms ``u``; ``dist_m <= 0`` means a round trip. At most ``max_s``.
 
         Linear interpolation of the quantile table at ``u`` (as ``np.interp``), vectorised over all
         requests at once when the quantile levels are a uniform grid (as written by bss_scenario)."""
@@ -92,7 +97,9 @@ class RideTimes:
         i = np.minimum(x.astype(np.int64), L - 1)
         f = x - i
         q = self._table[row, i] * (1.0 - f) + self._table[row, i + 1] * f
-        return np.where(rt, q, dist_m / np.where(rt, 1.0, q))
+        with np.errstate(divide="ignore"):
+            t = np.where(rt, q, dist_m / np.where(rt, 1.0, q))
+        return np.minimum(t, self.max_s)
 
     def _sample_loop(self, dist_m: np.ndarray, kind: np.ndarray, u: np.ndarray) -> np.ndarray:
         out = np.empty(len(dist_m))
@@ -104,8 +111,9 @@ class RideTimes:
             for j in range(self.speed_q.shape[1]):
                 m = ~rt & (kind == k) & (b == j)
                 if m.any():
-                    out[m] = dist_m[m] / np.interp(u[m], self.levels, self.speed_q[k, j])
-        return out
+                    with np.errstate(divide="ignore"):
+                        out[m] = dist_m[m] / np.interp(u[m], self.levels, self.speed_q[k, j])
+        return np.minimum(out, self.max_s)
 
     def cdf(self, t_s, dist_m, kind) -> np.ndarray:
         t_s, dist_m = np.broadcast_arrays(np.asarray(t_s, float), np.asarray(dist_m, float))
@@ -120,6 +128,7 @@ class RideTimes:
                 m = ~rt & (kind == k) & (b == j) & (t_s > 0)
                 if m.any():
                     out[m] = 1.0 - np.interp(dist_m[m] / t_s[m], self.speed_q[k, j], self.levels, left=0.0, right=1.0)
+        out[t_s >= self.max_s] = 1.0   # no ride is longer than the cap (#138)
         return out
 
 
