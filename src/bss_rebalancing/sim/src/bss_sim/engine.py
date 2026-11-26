@@ -24,10 +24,11 @@ TRIP_END = 1
 TRIP_START = 2
 TRIP_REQUEST = 3
 SNAPSHOT = 4
+REDIRECT = 5  # log only: a docked trip continues to another station (the next TripEnd is queued)
 WAKEUP = 9
 
 EVENT_NAMES = {SLOT_START: "SlotStart", TRIP_END: "TripEnd", TRIP_START: "TripStart",
-               TRIP_REQUEST: "TripRequest", SNAPSHOT: "Snapshot", WAKEUP: "Wakeup"}
+               TRIP_REQUEST: "TripRequest", SNAPSHOT: "Snapshot", REDIRECT: "Redirect", WAKEUP: "Wakeup"}
 
 
 class EventQueue:
