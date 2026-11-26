@@ -19,6 +19,13 @@ Measured, single core, default configuration (dockless, 800 bikes, logging off):
 
 The truck benchmark (1 truck, random commands every ~5 min, budget 1 s) comes with M4.
 ``--check`` exits with status 1 when a budget is exceeded.
+
+**Machine speed.** Shared CI runners differ by up to 2x in speed between runs of the same code.
+Every run therefore also times a fixed pure-Python **reference workload** (``calib_s``: heap, list
+and dict operations like the simulator's hot path) and the budget is checked on times scaled to
+the reference machine: ``scaled = measured x REFERENCE_CALIB_S / calib_s``. Raw times are always
+reported next to the scaled ones. ``REFERENCE_CALIB_S`` is the median calibration on GitHub's
+ubuntu-latest runners with Python 3.11 (see docs/sim-v2/reports/performance.md).
 """
 
 from __future__ import annotations
@@ -39,6 +46,8 @@ from bss_sim.engine import TimeLimit
 from bss_sim.simulator import Simulator
 
 BUDGET = {"load_s": 2.0, "week_s": 0.5, "peak_mb": 600.0}
+SCALED = ("load_s", "week_s")       # time budgets are checked on machine-scaled times
+REFERENCE_CALIB_S = None            # set from CI runs (#105); None = no scaling
 START = "2024-09-16T00:00"
 WEEK = 7 * 86400.0
 
@@ -59,6 +68,27 @@ def _week(sim: Simulator, seed: int) -> float:
     return time.perf_counter() - t
 
 
+def calibrate(repeat: int = 5, n: int = 300_000) -> float:
+    """Best time of a fixed pure-Python workload (seconds): measures this machine and interpreter."""
+    import heapq
+
+    best = float("inf")
+    for _ in range(repeat):
+        heap: list = []
+        lst = [0] * 4096
+        d: dict = {}
+        t = time.perf_counter()
+        for i in range(n):
+            k = (i * 2654435761) & 4095
+            heapq.heappush(heap, (k * 0.5, i & 7, i))
+            lst[k] += 1
+            d[k] = lst[k]
+            if len(heap) > 512:
+                heapq.heappop(heap)
+        best = min(best, time.perf_counter() - t)
+    return best
+
+
 def grid_partition(sim: Simulator, cells: int = 500) -> np.ndarray:
     """A partition with about ``cells`` groups of consecutive node ids (stands in for a 300 m grid)."""
     n = sim.scenario.n_nodes
@@ -69,6 +99,8 @@ def run(bundle: str | Path, repeat: int = 3, threads: int = 4) -> dict:
     out: dict = {"bundle": str(bundle), "python": platform.python_version(),
                  "free_threaded": bool(sysconfig.get_config_var("Py_GIL_DISABLED")),
                  "numpy": np.__version__, "machine": platform.machine(), "repeat": repeat}
+    out["calib_s"] = calibrate()
+    out["speed_factor"] = (REFERENCE_CALIB_S / out["calib_s"]) if REFERENCE_CALIB_S else 1.0
     t = time.perf_counter()
     sim = Simulator.from_scenario(bundle)
     out["load_s"] = time.perf_counter() - t
@@ -100,8 +132,11 @@ def run(bundle: str | Path, repeat: int = 3, threads: int = 4) -> dict:
         parallel = time.perf_counter() - t
         out["threads"] = threads
         out["threads_speedup"] = serial / parallel
+    out["calib_s_after"] = calibrate()  # the machine may change speed during the run: report both
+    for k in SCALED:
+        out[f"{k}_scaled"] = out[k] * out["speed_factor"]
     out["budget"] = BUDGET
-    out["over_budget"] = [k for k, v in BUDGET.items() if out[k] > v]
+    out["over_budget"] = [k for k, v in BUDGET.items() if out.get(f"{k}_scaled", out[k]) > v]
     return out
 
 
