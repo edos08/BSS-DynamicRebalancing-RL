@@ -104,6 +104,25 @@ rl_training/
 
 ---
 
+### Training on the new simulator (`GridZoneEnv`)
+
+```bash
+# once: the bundle of the legacy zone (south-east Cambridge, as in sources.json), Cambridge 2024 data
+python scripts/clip_osm.py
+bss-scenario build configs/scenarios/cambridge-se-2024.yaml --out data/scenarios/cambridge-se-2024
+bss-scenario demand data/scenarios/cambridge-se-2024
+
+python -m rl_training.train_grid --bundle data/scenarios/cambridge-se-2024 --results-path results/ \
+    --run-id 2 --episodes 30 --device cuda:0
+```
+
+Trains the same agent and network on `bss_gym.GridZoneEnv` (issue #166), with the legacy
+hyper-parameters. Each transition stores the discounted reward of the action from the env's
+per-step rewards (`info["step_rewards"]`), its duration, and `terminal=False` (episodes end by time
+limit). The results use the legacy layout (`results/run_NNN/training/episode_NNN/`, the greedy
+evaluation on held-out weeks in `validation/`, models in `models/`), so `bss-results-webapp` shows
+them next to the legacy runs.
+
 ## Training Parameters
 
 ### CLI Arguments
@@ -209,13 +228,18 @@ Hybrid Q-network: a Graph Attention encoder over the cell graph, fused with an M
 - **Epsilon-greedy** exploration with the schedule above
 - **Experience replay** of graph-pair transitions (`PairData`)
 - **Optimizer**: SGD, **loss**: Smooth L1, gradient clipping (max norm 10)
-- **n-step discount**: `gamma ** steps`, where `steps` is the number of simulation ticks the action took
+- **Semi-MDP target** (#164): an action lasts `tau` steps of 30 s, so
+  `y = R + gamma^tau * Q_target(s', argmax_a Q(s', a)) * (1 - terminal)` with `R = sum_i gamma^i r_i` the
+  discounted reward collected during the action (`DQNAgent.smdp_target`, `DQNAgent.action_return`).
+  `tau` is the duration of the action taken **in `s`**: `ReplayBuffer.push(..., steps=tau, terminal=...)`
+  requires it. `terminal` is true only for real terminal states: an episode that ends on a time limit is
+  truncated and still bootstraps.
 - **Action masking** is supported by `select_action(..., avoid_action=[...])`
 
 ### Replay Buffer
 
 `ReplayBuffer` stores `PairData` objects holding the source graph (`x_s`, `edge_index_s`, `edge_attr_s`), the next graph
-(`x_t`, …), the agent states, action, reward, done flag and step count. Batches are built with PyTorch Geometric.
+(`x_t`, …), the agent states, action, reward, done and terminal flags and the duration of the action (`steps`). Batches are built with PyTorch Geometric.
 `save_to_files` / `load_from_files` persist it in chunks.
 
 ---
@@ -313,7 +337,8 @@ while not done:
     next_state = convert_graph_to_data(graph, node_features=FEATURES)
     next_state.agent_state, next_state.steps = obs, info["steps"]
 
-    agent.replay_buffer.push(state, action, reward, next_state, done)
+    # semi-MDP: this action lasted info["steps"]; time-limit ends are not terminal
+    agent.replay_buffer.push(state, action, reward, next_state, done, steps=info["steps"], terminal=False)
     agent.train_step(batch_size=64)
     if timeslot_done:
         agent.update_epsilon()

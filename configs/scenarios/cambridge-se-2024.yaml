@@ -1,0 +1,17 @@
+# Scenario bundle for south-east Cambridge, MA (the legacy environment's zone), BlueBikes 2024.
+# Paths are relative to this file. Build with:
+#   python scripts/clip_osm.py && bss-scenario build configs/scenarios/cambridge-se-2024.yaml --out data/scenarios/cambridge-se-2024 && bss-scenario demand data/scenarios/cambridge-se-2024
+id: cambridge-se-2024
+timezone: America/New_York
+slot_minutes: 60
+fit_period: ["2024-04-01", "2024-11-30"]     # demand shape fitted on Apr-Nov (D16)
+inputs:
+  trips_raw: ../../data/raw/bluebikes/2024     # monthly *-tripdata.csv from bluebikes.com/system-data
+  boundary: ../../data/raw/osm/cambridge_se_boundary.geojson
+  bike_graphml: ../../data/raw/osm/cambridge_se_bike.graphml
+  drive_graphml: ../../data/raw/osm/cambridge_se_drive.graphml
+  gbfs_station_information: ../../data/raw/gbfs/2026-11-25/station_information.json
+options:
+  min_duration_s: 60
+  max_duration_s: 10800
+  walk_radius_max_m: 800
