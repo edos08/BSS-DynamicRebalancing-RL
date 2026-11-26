@@ -119,11 +119,19 @@ class Spreader:
         self.indptr, self.nodes = indptr, nodes
         # cumulative probability inside each place, offset by the place index: place s spans (s, s+1]
         cum = np.empty_like(probs)
+        norm = np.empty_like(probs)
         for s in range(self.n):
             a, b = indptr[s], indptr[s + 1]
             c = np.cumsum(probs[a:b])
             cum[a:b] = s + c / c[-1]
+            norm[a:b] = probs[a:b] / c[-1]
         self._cum = cum
+        self.probs = norm  # probability of each node within its place (sums to 1 per place)
+
+    def node_weights(self, place_weights: np.ndarray, n_nodes: int) -> np.ndarray:
+        """Spread per-place weights (in-city places) over nodes: ``sum_p w[p] * P(node | p)``."""
+        w = np.repeat(np.asarray(place_weights, dtype=np.float64)[: self.n], np.diff(self.indptr)) * self.probs
+        return np.bincount(self.nodes, weights=w, minlength=n_nodes)
 
     def sample(self, place: np.ndarray, u: np.ndarray) -> np.ndarray:
         """Node for each in-city place (place < n); callers handle EXTERNAL themselves."""

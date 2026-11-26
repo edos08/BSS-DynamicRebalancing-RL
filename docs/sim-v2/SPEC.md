@@ -278,6 +278,30 @@ distribution.
 - Arrival from `EXTERNAL`: a bike from the external reservoir appears at the destination node.
 - Reservoir size and battery distribution are configuration; fleet conservation includes it.
 
+Implementation (#100): a trip to `EXTERNAL` leaves at `TripStart`, after the user has walked to the
+bike and its battery is charged for `energy.external_trip_km`. A request from `EXTERNAL` takes a
+bike of the preferred kind from the reservoir if it has one, otherwise one of the other kind, or fails
+with `EXTERNAL_EMPTY` when the reservoir is empty. The bike arrives at its destination after the
+request's ride time, or `external.ride_time_s` (15 min) when that is unknown. An e-bike gets a fresh
+battery drawn from `fleet.initial_battery`, because bikes are charged outside the city too.
+
+**Drift and the default size.** Recorded trips are outcomes, but the simulator treats them as
+requests. Requests from inside the city can fail (no bike nearby, walk declined), while requests
+from outside find a bike as long as the reservoir has one. So the city gains bikes even though the
+fitted demand has slightly more trips out than in (in/out = 0.97). One simulated week of September
+2024 (dockless, 800 bikes, no trucks) shows it:
+
+| reservoir | requests from outside served | trips out of the city | city bikes after 7 days | `EXTERNAL_EMPTY` |
+|---|---|---|---|---|
+| 500 | 13,876 | 13,376 | 1,288 | 6.3 % of requests |
+| 4,000 (all bikes outside Cambridge) | 17,765 | 15,125 | 3,421 | 0 |
+
+A finite reservoir limits the drift: once it is empty, a bike can come in only after another has
+gone out. The default is **1,000**, the value of the old simulator's pool of outside bikes.
+Calibration in M7 (#32) checks the reservoir together with the fleet size, against replayed 2024
+days. KPIs give the service level both for all requests and for requests starting in the city,
+which are the ones a controller can influence.
+
 ---
 
 ## 7. Users and fleet
