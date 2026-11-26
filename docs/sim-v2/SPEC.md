@@ -457,32 +457,39 @@ Commands (queued per truck, executed in order):
 Hours with similar factors are grouped into a few traffic regimes so that time matrices stay small
 (one ~16 MB matrix per regime).
 
-**Energy** (`VehicleEnergyModel`, issue #28): trucks are **electric vans**. Consumption is a
-function of speed (constant-speed consumption curve, as used by TomTom's EV routing), stops and
-load. The default preset `e_transit` follows a Ford E-Transit cargo van (≈ 68 kWh usable battery,
-≈ 0.3–0.4 kWh/km in urban driving); the exact curve and figures are fixed and sourced in #28.
+**Energy** (`bss_sim.vehicle`, #122): trucks are **electric vans**. Consumption of a drive uses its
+distance, its average speed, the stops on the way and the load: rolling resistance, aerodynamic drag,
+kinetic energy lost at stops net of regenerative braking, all through the drivetrain efficiency, plus
+auxiliaries for the driving time. During services the van stands with lower auxiliary power. The
+default preset `e_transit` follows a Ford E-Transit cargo van: 68 kWh usable (2022–23; 89 kWh for
+the 2024+ extended-range pack). Ford's range figures give about 0.34 kWh/km on a mixed cycle. With
+typical cargo-van parameters (2,900 kg, Crr 0.012, CdA 2.0 m², drivetrain 0.85, regeneration 60 %,
+auxiliaries 2 kW), the model gives 0.31 kWh/km at 60 km/h with 1 stop/km and **0.24 kWh/km at
+25 km/h with 3 stops/km** (Cambridge streets). All parameters are in the `vehicle` section of the
+configuration.
 
 The van battery is **not a constraint**: vans are assumed always charged, because a van running
 low is swapped for a charged one at its next depot visit. This is negligible in practice: a shift
-in Cambridge (≈ 18 km²) drives on the order of 60–120 km, i.e. roughly 20–50 kWh, below the usable
+in Cambridge (≈ 18 km²) drives on the order of 60–120 km, i.e. roughly 15–30 kWh, below the usable
 capacity. Energy is a **KPI**: kWh per truck and per shift (and derived cost/emissions) are
 reported, and a run is flagged if a truck's kWh between two depot visits exceeds the usable
 capacity, so the assumption is checked rather than trusted.
 
-**Cost and emissions** (KPIs only, for later analyses; they never change the dynamics):
+**Cost and emissions** (KPIs only, for later analyses; they never change the dynamics). They are in
+USD for Cambridge, MA, in the `costs` section, with these sourced defaults:
 
 ```yaml
 costs:
-  electricity_eur_per_kwh: ...      # energy cost of the vans
-  driver_eur_per_hour: ...          # labour, per truck-hour on shift
-  van_eur_per_km: ...               # maintenance / depreciation
-  battery_swap_eur: ...             # handling cost per swapped battery
-emissions:
-  grid_kgco2e_per_kwh: ...          # electricity carbon intensity (ISO New England average)
+  electricity_usd_per_kwh: 0.22     # EIA, Massachusetts commercial price, Oct 2025 (21.98 ¢/kWh)
+  charging_efficiency: 0.90         # grid -> battery (assumption)
+  driver_usd_per_hour: 22.68        # BLS OEWS May 2021, light truck drivers, Boston metro (wages only)
+  van_usd_per_km: 0.10              # maintenance and tyres (assumption)
+  battery_swap_usd: 0.0             # handling already paid as driver time
+  grid_kgco2e_per_kwh: 0.254        # ISO-NE 2024 average incl. net imports (560 lb CO2/MWh)
 ```
 
 Reported per truck, per shift and per run: kWh, km driven, operating cost, kg CO2e, and per
-rebalanced bike / per extra served trip. Default values are chosen and sourced in #28.
+rebalanced bike / per extra served trip.
 
 ### 9.1 Depot returns and resuming
 
