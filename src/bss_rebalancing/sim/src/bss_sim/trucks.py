@@ -17,10 +17,12 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
-from bss_sim.commands import Command, Drop, GoTo, PickUp, Restock, ToDepot, Wait
+from bss_sim.commands import Command, Drop, GoTo, PickUp, Restock, SwapBattery, ToDepot, Wait
 
 TRUCK_IDLE = "truck_idle"
 COMMAND_DONE = "command_done"
+TRUCK_RESTOCKING = "truck_restocking"   # stock empty: going to the depot on its own (on_empty: resume)
+TRUCK_RESUMED = "truck_resumed"         # restocked: continuing the interrupted command
 
 
 @dataclass
@@ -47,6 +49,9 @@ class Truck:
     commands_done: int = 0
     picked: int = 0
     dropped: int = 0
+    swapped: int = 0
+    auto_restock: bool = False     # a depot trip inserted by on_empty: resume is in the queue
+    idle_reported: bool = False
 
     @property
     def busy(self) -> bool:
@@ -73,6 +78,9 @@ def validate(cmd: Command, n_nodes: int) -> str:
     elif isinstance(cmd, Drop):
         if not count_ok(cmd.n) or (cmd.at is not None and (not cmd.at or not all(node_ok(v) for v in cmd.at))):
             return "invalid: Drop needs n >= 0 and at = None or bike nodes"
+    elif isinstance(cmd, SwapBattery):
+        if not count_ok(cmd.n) or not cmd.radius_m >= 0:
+            return "invalid: SwapBattery needs n >= 0 and radius_m >= 0"
     elif isinstance(cmd, Restock):
         if (cmd.load is not None and not count_ok(cmd.load)) or (cmd.batteries is not None and not count_ok(cmd.batteries)):
             return "invalid: Restock load / batteries must be >= 0"

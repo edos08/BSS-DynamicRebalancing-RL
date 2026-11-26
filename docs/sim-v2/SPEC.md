@@ -510,6 +510,17 @@ When the stock is empty and the current or next command needs it:
 Resuming the interrupted command, rather than returning to the point where the stock ran out,
 keeps the controller's plan valid and avoids a wasted trip back.
 
+Implementation (#125): the check runs when a command is about to start.
+- A `SwapBattery` with an empty stock, while e-bikes in reach still need a swap, inserts
+  `ToDepot, Restock, GoTo(<this stop>)` before it.
+- A `GoTo` followed by such a swap inserts `ToDepot, Restock` before the `GoTo`, so the truck heads
+  where it was going after restocking.
+- A swap that empties the stock part-way reports `stock_empty` with what it did. If e-bikes there
+  still need a swap, it re-queues the rest the same way.
+- Notifications: `truck_restocking`, then `truck_resumed` after the restock.
+- With `on_empty: idle`, the remaining queue is cancelled and the truck reports
+  `truck_idle(reason="stock_empty")`.
+
 Execution is honest about time: driving, stopping and handling all take time, and the state
 changes when they complete (fixes the old asymmetry where pick-ups happened at decision time).
 Partial execution (e.g. fewer bikes available) is reported in the `CommandResult`.
