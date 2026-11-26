@@ -193,6 +193,20 @@ class CostConfig:
 
 
 @dataclass(frozen=True)
+class InfoConfig:
+    """What controllers may see (spec §8, ``bss_sim.info``)."""
+
+    inflight_knowledge: str = "origin"   # none | count | origin | destination (oracle)
+    allow_oracle: bool = False           # required for destination knowledge and OracleForecast
+
+    def __post_init__(self):
+        _check(self.inflight_knowledge in ("none", "count", "origin", "destination"),
+               f"info.inflight_knowledge: unknown {self.inflight_knowledge!r}")
+        _check(self.inflight_knowledge != "destination" or self.allow_oracle,
+               "info.inflight_knowledge 'destination' is an oracle: set info.allow_oracle: true (ablations only)")
+
+
+@dataclass(frozen=True)
 class TelemetryConfig:
     event_log: bool = False              # columnar log of every event outcome
     snapshot_every_s: float | None = None  # periodic per-node bike counts in the log
@@ -213,6 +227,7 @@ class SimConfig:
     travel: TravelConfig = field(default_factory=TravelConfig)
     vehicle: VehicleConfig = field(default_factory=VehicleConfig)
     costs: CostConfig = field(default_factory=CostConfig)
+    info: InfoConfig = field(default_factory=InfoConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     debug: bool = False                  # check invariants after every event (slow)
 
