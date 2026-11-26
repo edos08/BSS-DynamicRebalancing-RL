@@ -61,12 +61,14 @@ class EnergyConfig:
     reserve_km: float = 1.0              # a user takes an e-bike only if it covers the trip + this reserve
     external_trip_km: float = 3.0        # assumed in-city part of a trip to/from EXTERNAL (battery check, use)
     dead_ebike_rideable: bool = False    # True: an e-bike without charge can be ridden like a classic bike
+    round_trip_speed_mps: float = 2.5    # round trips by place: distance = ride time x this pace
     battery_bands: tuple[float, ...] = (0.2, 0.5)  # band edges (fraction of range) for aggregates
 
     def __post_init__(self):
         _check(self.consumption_km_per_km >= 0, "energy.consumption_km_per_km must be >= 0")
         _check(self.reserve_km >= 0, "energy.reserve_km must be >= 0")
         _check(self.external_trip_km >= 0, "energy.external_trip_km must be >= 0")
+        _check(self.round_trip_speed_mps > 0, "energy.round_trip_speed_mps must be > 0")
         b = self.battery_bands
         _check(all(0 < x < 1 for x in b) and list(b) == sorted(set(b)),
                "energy.battery_bands must be increasing fractions in (0, 1)")
