@@ -36,6 +36,7 @@ class Scenario:
     drive_lat: np.ndarray         # float64 [M]
     drive_lon: np.ndarray
     bike_to_drive: np.ndarray     # int32 [N] nearest drive node of each bike node
+    bike_to_drive_m: np.ndarray   # float32 [N] distance to it
     road_classes: tuple[str, ...]
 
     @property
@@ -49,6 +50,14 @@ class Scenario:
     def traffic_factors_path(self) -> Path | None:
         p = self.root / "traffic" / "factors.json"
         return p if p.exists() else None
+
+    def stop_at(self, drive: int) -> int:
+        """The bike node served by drive node ``drive``: among bike nodes mapped to it, the closest;
+        if none, the bike node whose drive node is fastest to reach from it."""
+        mine = np.flatnonzero(self.bike_to_drive == drive)
+        if len(mine):
+            return int(mine[np.argmin(self.bike_to_drive_m[mine])])
+        return int(np.argmin(np.asarray(self.drive_time)[drive, self.bike_to_drive]))
 
     def nearest_drive_node(self, lat: float, lon: float) -> int:
         """Drive node closest to a coordinate (equirectangular distance; fine at city scale)."""
@@ -83,11 +92,11 @@ class Scenario:
             d_lat, d_lon = z["lat"].astype(np.float64), z["lon"].astype(np.float64)
             classes = tuple(str(c) for c in z["road_classes"])
         with np.load(root / "network" / "bike_to_drive.npz") as z:
-            b2d = z["node"].astype(np.int32)
+            b2d, b2d_m = z["node"].astype(np.int32), z["dist_m"].astype(np.float32)
         return cls(root, manifest.get("bundle_id", root.name), mode, len(indptr) - 1, indptr, indices, dist, rmax,
                    demand.bike_dist, st_node, st_cap, demand,
                    np.load(root / "network" / "drive_time.npy", mmap_mode="r"),
-                   np.load(root / "network" / "drive_dist.npy", mmap_mode="r"), d_lat, d_lon, b2d, classes)
+                   np.load(root / "network" / "drive_dist.npy", mmap_mode="r"), d_lat, d_lon, b2d, b2d_m, classes)
 
     def departure_weights(self) -> np.ndarray:
         """Expected departures per node over a typical week (initial distribution)."""

@@ -37,13 +37,16 @@ import numpy as np
 from bss_sim.config import SimConfig
 from bss_sim.demand import PoissonDemand, ReplayDemand
 from bss_sim.energy import Battery
-from bss_sim.engine import (REDIRECT, SLOT_START, SNAPSHOT, TRIP_END, TRIP_REQUEST, TRIP_START, WAKEUP,
+from bss_sim.engine import (REDIRECT, SLOT_START, SNAPSHOT, TRIP_END, TRIP_REQUEST, TRIP_START, TRUCK, WAKEUP,
                             EventQueue, Notification, Until)
 from bss_sim.partitions import Partition, PartitionCounts
 from bss_sim.rng import Streams
 from bss_sim.scenario import Scenario
 from bss_sim import telemetry
-from bss_sim.state import ELECTRIC, RESERVED, RIDING, Fleet, initial_nodes
+from bss_sim.commands import Command, CommandResult, GoTo, ToDepot, Wait
+from bss_sim.state import DEPOT, ELECTRIC, ON_TRUCK, RESERVED, RIDING, Fleet, initial_nodes
+from bss_sim.travel import make_travel
+from bss_sim.trucks import COMMAND_DONE, TRUCK_IDLE, Truck, validate
 from bss_sim.users import EXTERNAL_EMPTY, NO_DOCK, REASONS, REQUEST_FAILURES, SERVED, WalkingUsers
 
 USER_SLOT_STREAM = 0x5E5
@@ -132,6 +135,12 @@ class Simulator:
         self._docked = config.mode == "docked"
         if self._docked:
             self._init_docks()
+        self.travel = make_travel(scenario, config.travel)
+        tc = config.trucks
+        self.depot_drive = scenario.nearest_drive_node(tc.depot_lat, tc.depot_lon)
+        self.depot_stop = scenario.stop_at(self.depot_drive)
+        self._b2d: list[int] = scenario.bike_to_drive.tolist()
+        self.trucks: list[Truck] = []
 
     def _init_docks(self) -> None:
         """Capacity per node and, for every station node, the other station nodes by riding distance."""
@@ -165,6 +174,8 @@ class Simulator:
             self.demand = ReplayDemand(sc.demand, sc.root, seed=self.streams.int_seed("demand"))
         self._user_seed = self.streams.int_seed("users")
         self._ext_rng = self.streams.generator("external")
+        self.travel.bind(self.streams.generator("travel"), self.day0)
+        self._init_trucks()
         self._init_fleet(snapshot)
         self.users.bind(self.fleet)
         for part in self._parts.values():
@@ -177,7 +188,7 @@ class Simulator:
         self.log = [] if cfg.telemetry.event_log else None
         self._notes: list[Notification] = []
         self._wake_tags: list = []
-        n = cfg.fleet.size + cfg.external.reservoir
+        n = self.fleet.n
         # per-bike current trip (Python lists: scalar access on the hot path)
         self._trip_dest: list[int] = [-1] * n
         self._trip_km: list[float] = [0.0] * n
@@ -197,16 +208,28 @@ class Simulator:
         self.queue.push(self._slot * 3600.0, SLOT_START, self._slot)
         if cfg.telemetry.snapshot_every_s:
             self.queue.push(self.now, SNAPSHOT)
-        return []
+        return [Notification(self.now, TRUCK_IDLE, {"truck": tr.id, "reason": "start"}) for tr in self.trucks]
+
+    def _init_trucks(self) -> None:
+        tc = self.config.trucks
+        self.trucks = []
+        rng = self.streams.generator("truck_start")
+        for i in range(tc.count):
+            stop = self.depot_stop if tc.start == "depot" else int(rng.integers(self.scenario.n_nodes))
+            self.trucks.append(Truck(i, stop, self._b2d[stop], stock=tc.battery_stock_initial))
 
     def _init_fleet(self, snapshot) -> None:
         cfg, sc = self.config, self.scenario
         rng = self.streams.generator("fleet")
         n_city, n_ext = cfg.fleet.size, cfg.external.reservoir
-        n = n_city + n_ext
-        kind = (rng.random(n) < self._ebike_share).astype(np.uint8)
+        n_ops = cfg.trucks.count * cfg.trucks.initial_load + cfg.trucks.depot_spare_bikes
+        kind = (rng.random(n_city + n_ext) < self._ebike_share).astype(np.uint8)
         lo, hi = cfg.fleet.initial_battery
-        battery = self.battery.draw(rng, n, lo, hi)
+        battery = self.battery.draw(rng, n_city + n_ext, lo, hi)
+        # operators' bikes: own stream (so trucks never change the street fleet), charged
+        ops = self.streams.generator("trucks")
+        kind = np.concatenate([kind, (ops.random(n_ops) < self._ebike_share).astype(np.uint8)])
+        battery = np.concatenate([battery, np.full(n_ops, cfg.fleet.battery_range_km)])
         fleet = Fleet(sc.n_nodes, kind, battery, cfg.fleet.battery_range_km)
         capacity = sc.node_capacity() if cfg.mode == "docked" else None
         dist = cfg.fleet.initial_distribution
@@ -223,10 +246,21 @@ class Simulator:
         else:  # uniform, dockless: over the nodes where demand can start
             w = (sc.departure_weights() > 0).astype(np.float64)
             nodes = initial_nodes(rng, n_city, w, capacity)
-        # city bikes are 0..n_city-1; the reservoir keeps the others
-        fleet.reservoir = tuple([b for b in range(n_city, n) if fleet.kind_l[b] == k] for k in (0, 1))
+        # ids: city bikes 0..n_city-1, then the reservoir, then bikes on trucks, then depot spares
+        fleet.reservoir = tuple([b for b in range(n_city, n_city + n_ext) if fleet.kind_l[b] == k] for k in (0, 1))
         for b in range(n_city):
             fleet.park(b, int(nodes[b]))
+        b = n_city + n_ext
+        self.depot_bikes: list[int] = []
+        for tr in self.trucks:
+            for _ in range(cfg.trucks.initial_load):
+                fleet.set_status(b, ON_TRUCK)
+                tr.load.append(b)
+                b += 1
+        for _ in range(cfg.trucks.depot_spare_bikes):
+            fleet.set_status(b, DEPOT)
+            self.depot_bikes.append(b)
+            b += 1
         self.fleet = fleet
 
     # -------------------------------------------------------------------------- controller API
@@ -253,6 +287,18 @@ class Simulator:
 
     def partition(self, name: str) -> PartitionCounts:
         return self._parts[name].counts()
+
+    def submit(self, truck: int, commands: list[Command], replace: bool = False) -> None:
+        """Append ``commands`` to a truck's queue (``replace``: drop the queued ones first; the
+        command in progress always finishes). An idle truck starts at once."""
+        tr = self.trucks[truck]
+        if replace:
+            while tr.queue:
+                cmd = tr.queue.popleft()
+                self._result(tr, CommandResult(tr.id, cmd, 0, 0, self.now, self.now, "cancelled"))
+        tr.queue.extend(commands)
+        if not tr.busy:
+            self._next_command(tr)
 
     @property
     def datetime(self) -> dt.datetime:
@@ -362,6 +408,13 @@ class Simulator:
                 self._snap_t.append(t)
                 self._snap.append(self.fleet.n_bikes.astype(np.int16))
                 self.queue.push(t + self.config.telemetry.snapshot_every_s, SNAPSHOT)
+            elif kind == TRUCK:
+                tr = self.trucks[a]
+                if b == tr.serial:  # not a stale event
+                    n0 = len(self._notes)
+                    self._truck_done(tr)
+                    if kinds and any(nt.kind in kinds for nt in self._notes[n0:]):
+                        stop = True
             elif kind == WAKEUP:
                 note = Notification(t, "wakeup", {"tag": self._wake_tags[a]})
                 self._notes.append(note)
@@ -510,3 +563,49 @@ class Simulator:
                              NO_DOCK if extra_m > self.config.users.redirect_radius_m else SERVED, extra_m))
         self.queue.push(self.now + extra_m / speed, TRIP_END, bike)
         return True
+
+    # ------------------------------------------------------------------------------- trucks
+    def _result(self, tr: Truck, res: CommandResult) -> None:
+        tr.commands_done += 1
+        self._notes.append(Notification(self.now, COMMAND_DONE, {"truck": tr.id, "result": res}))
+
+    def _next_command(self, tr: Truck) -> None:
+        """Start the next queued command; emit ``truck_idle`` when there is none."""
+        while tr.queue:
+            cmd = tr.queue.popleft()
+            reason = validate(cmd, self.scenario.n_nodes)
+            if reason:
+                self._result(tr, CommandResult(tr.id, cmd, 0, 0, self.now, self.now, reason))
+                continue
+            tr.current, tr.t_start = cmd, self.now
+            tr.serial += 1
+            self._start(tr, cmd)
+            return
+        tr.current = None
+        self._notes.append(Notification(self.now, TRUCK_IDLE, {"truck": tr.id, "reason": "queue_empty"}))
+
+    def _busy_until(self, tr: Truck, t: float) -> None:
+        tr.eta = t
+        self.queue.push(t, TRUCK, tr.id, tr.serial)
+
+    def _start(self, tr: Truck, cmd: Command) -> None:
+        if isinstance(cmd, (GoTo, ToDepot)):
+            stop = cmd.node if isinstance(cmd, GoTo) else self.depot_stop
+            dest = self._b2d[stop] if isinstance(cmd, GoTo) else self.depot_drive
+            t = self.travel.time(tr.drive_node, dest, self.now)
+            tr.km += self.travel.distance(tr.drive_node, dest) / 1000.0
+            tr.drive_s += t
+            tr.target = (stop, dest)
+            self._busy_until(tr, self.now + t)
+        elif isinstance(cmd, Wait):
+            tr.wait_s += cmd.seconds
+            self._busy_until(tr, self.now + cmd.seconds)
+
+    def _truck_done(self, tr: Truck) -> None:
+        cmd = tr.current
+        if isinstance(cmd, (GoTo, ToDepot)):
+            tr.stop, tr.drive_node = tr.target
+            tr.target = None
+        self._result(tr, CommandResult(tr.id, cmd, 1, 1, tr.t_start, self.now))
+        tr.current = None
+        self._next_command(tr)

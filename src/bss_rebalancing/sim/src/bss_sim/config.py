@@ -102,6 +102,40 @@ class ExternalConfig:
 
 
 @dataclass(frozen=True)
+class TruckConfig:
+    """Operators (spec §9). Truck bikes and depot spares are extra bikes on top of ``fleet.size``."""
+
+    count: int = 1
+    capacity: int = 30
+    depot_lat: float = 42.37065          # First St x Cambridge St, East Cambridge (D19)
+    depot_lon: float = -71.07692
+    start: str = "depot"                 # depot | random (a random bike node, per run seed)
+    initial_load: int = 15               # bikes on board at the start (charged)
+    depot_spare_bikes: int = 0           # extra bikes waiting at the depot
+    battery_stock_max: int = 60          # charged e-bike batteries a truck can carry
+    battery_stock_initial: int = 60
+    on_empty: str = "resume"             # resume | idle (spec §9.1)
+    pickup_per_bike_s: float = 30.0
+    drop_per_bike_s: float = 30.0
+    swap_per_bike_s: float = 60.0
+    stop_overhead_s: float = 60.0        # per service (pick-up, drop, swap) at a stop
+    depot_restock_s: float = 600.0
+    max_spread_m: float = 400.0          # Drop(at=...): nodes within this walking distance of the stop
+
+    def __post_init__(self):
+        _check(self.count >= 0, "trucks.count must be >= 0")
+        _check(self.capacity >= 0, "trucks.capacity must be >= 0")
+        _check(0 <= self.initial_load <= self.capacity, "trucks.initial_load must be in [0, capacity]")
+        _check(self.depot_spare_bikes >= 0, "trucks.depot_spare_bikes must be >= 0")
+        _check(0 <= self.battery_stock_initial <= self.battery_stock_max, "trucks.battery_stock_initial must be in [0, max]")
+        _check(self.start in ("depot", "random"), f"trucks.start must be 'depot' or 'random', got {self.start!r}")
+        _check(self.on_empty in ("resume", "idle"), f"trucks.on_empty must be 'resume' or 'idle', got {self.on_empty!r}")
+        for name in ("pickup_per_bike_s", "drop_per_bike_s", "swap_per_bike_s", "stop_overhead_s", "depot_restock_s",
+                     "max_spread_m"):
+            _check(getattr(self, name) >= 0, f"trucks.{name} must be >= 0")
+
+
+@dataclass(frozen=True)
 class TravelConfig:
     model: str = "auto"                  # auto (congestion if the bundle has fitted factors) | freeflow | congestion
     scale: float = 1.0                   # multiplies free-flow times (calibration against routing data)
@@ -174,6 +208,7 @@ class SimConfig:
     energy: EnergyConfig = field(default_factory=EnergyConfig)
     users: UserConfig = field(default_factory=UserConfig)
     external: ExternalConfig = field(default_factory=ExternalConfig)
+    trucks: TruckConfig = field(default_factory=TruckConfig)
     travel: TravelConfig = field(default_factory=TravelConfig)
     vehicle: VehicleConfig = field(default_factory=VehicleConfig)
     costs: CostConfig = field(default_factory=CostConfig)
