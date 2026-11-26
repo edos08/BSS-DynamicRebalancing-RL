@@ -17,7 +17,8 @@ Measured, single core, default configuration (dockless, 800 bikes, logging off):
 * ``threads_speedup``: ``--threads`` simulators in parallel threads vs one after the other
   (reported; > 1 only on free-threaded Python).
 
-The truck benchmark (1 truck, random commands every ~5 min, budget 1 s) comes with M4.
+* ``week_truck_s``: one week with one truck; every 5 min a controller wakes up and gives it a random
+  stop and a random service (pick up, drop or swap 2), replacing its queue (budget 1 s, #126).
 ``--check`` exits with status 1 when a budget is exceeded.
 
 **Machine speed.** Shared CI runners differ by up to 2x in speed between runs of the same code.
@@ -41,12 +42,13 @@ from pathlib import Path
 
 import numpy as np
 
+from bss_sim.commands import Drop, GoTo, PickUp, SwapBattery
 from bss_sim.config import SimConfig
-from bss_sim.engine import TimeLimit
+from bss_sim.engine import At, OnNotification, TimeLimit
 from bss_sim.simulator import Simulator
 
-BUDGET = {"load_s": 2.0, "week_s": 0.5, "peak_mb": 600.0}
-SCALED = ("load_s", "week_s")       # time budgets are checked on machine-scaled times
+BUDGET = {"load_s": 2.0, "week_s": 0.5, "week_truck_s": 1.0, "peak_mb": 600.0}
+SCALED = ("load_s", "week_s", "week_truck_s")  # time budgets are checked on machine-scaled times
 REFERENCE_CALIB_S = 0.115           # GitHub ubuntu-latest, Python 3.11 (CI run 45809102526, #105)
 START = "2024-09-16T00:00"
 WEEK = 7 * 86400.0
@@ -65,6 +67,23 @@ def _week(sim: Simulator, seed: int) -> float:
     sim.reset(seed=seed, start=START)
     t = time.perf_counter()
     sim.run(TimeLimit(WEEK))
+    return time.perf_counter() - t
+
+
+def _week_truck(sim: Simulator, seed: int, every_s: float = 300.0) -> float:
+    """One week with truck 0 commanded at random every ``every_s`` (controller time included)."""
+    rng = np.random.default_rng(seed)
+    sim.reset(seed=seed, start=START)
+    n = sim.scenario.n_nodes
+    end = sim.now + WEEK
+    t = time.perf_counter()
+    sim.wakeup(after=every_s)
+    while sim.now < end:
+        notes = sim.run(OnNotification("wakeup") | At(end))
+        if any(nt.kind == "wakeup" for nt in notes):
+            service = (PickUp(2), Drop(2), SwapBattery(2))[int(rng.integers(3))]
+            sim.submit(0, [GoTo(int(rng.integers(n))), service], replace=True)
+            sim.wakeup(after=every_s)
     return time.perf_counter() - t
 
 
@@ -110,6 +129,9 @@ def run(bundle: str | Path, repeat: int = 3, threads: int = 4) -> dict:
     out["us_per_request"] = out["week_s"] / max(k["requests"], 1) * 1e6
     out["peak_mb"] = _peak_mb()
 
+    out["week_truck_s"] = min(_week_truck(sim, s) for s in range(repeat))
+    tk = sim.truck_kpis(0)
+    out["truck_week"] = {"commands": tk["commands"], "km": round(tk["km"], 1), "kwh": round(tk["kwh"], 2)}
     docks = int(sim.scenario.station_capacity.sum())
     size = min(SimConfig().fleet.size, int(0.44 * docks))  # Cambridge: 800 bikes for 1,824 docks
     docked = Simulator.from_scenario(bundle, SimConfig.from_dict({"mode": "docked", "fleet": {"size": size}}))

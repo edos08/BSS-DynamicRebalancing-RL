@@ -75,9 +75,19 @@ dockless and docked runs with a partition, 72k and 95k events.
 | Ride times are sampled from one quantile table for all requests | 16 masked `np.interp` calls → one gather |
 | Bike distances are read through a plain ndarray view of the memory map | `memmap.__getitem__` is Python code |
 
+## With a truck (#126)
+
+`week_truck_s`: one week with one truck. Every 5 minutes a controller wakes up and gives it a random
+stop and a random service (pick up, drop or swap 2 bikes), replacing its queue: about 4,000
+commands a week. Budget 1 s, checked on calibrated times like the others.
+
+| | Cambridge (dev server) |
+|---|---|
+| week with the truck, controller included | 0.44 s raw, 0.22 s scaled to the reference runner |
+| the same week without commands | 0.35 s |
+
 ## Not yet measured
 
-The truck benchmark (1 truck with random commands every ~5 min, budget 1 s) comes with M4. The
-Rust engine comparison comes with M8.
+The Rust engine comparison comes with M8.
 
 Reproduce: `python -m bss_sim.bench <bundle> --json out.json`.

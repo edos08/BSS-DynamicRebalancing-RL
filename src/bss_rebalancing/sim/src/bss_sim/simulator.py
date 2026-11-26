@@ -46,6 +46,7 @@ from bss_sim import telemetry
 from bss_sim.commands import Command, CommandResult, Drop, GoTo, PickUp, Restock, SwapBattery, ToDepot, Wait
 from bss_sim.state import DEPOT, ELECTRIC, ON_TRUCK, RESERVED, RIDING, Fleet, initial_nodes
 from bss_sim.travel import make_travel
+from bss_sim.vehicle import CostModel, VanEnergy
 from bss_sim.trucks import COMMAND_DONE, TRUCK_IDLE, TRUCK_RESTOCKING, TRUCK_RESUMED, Truck, validate
 from bss_sim.users import EXTERNAL_EMPTY, NO_DOCK, REASONS, REQUEST_FAILURES, SERVED, WalkingUsers
 
@@ -145,6 +146,8 @@ class Simulator:
         self.depot_stop = scenario.stop_at(self.depot_drive)
         self._b2d: list[int] = scenario.bike_to_drive.tolist()
         self.trucks: list[Truck] = []
+        self.van = VanEnergy(config.vehicle)
+        self.costs = CostModel(config.costs)
 
     def _init_docks(self) -> None:
         """Capacity per node and, for every station node, the other station nodes by riding distance."""
@@ -181,6 +184,7 @@ class Simulator:
         self._user_seed = self.streams.int_seed("users")
         self._ext_rng = self.streams.generator("external")
         self.travel.bind(self.streams.generator("travel"), self.day0)
+        self._t0 = self.now
         self._init_trucks()
         self._init_fleet(snapshot)
         self.users.bind(self.fleet)
@@ -311,7 +315,17 @@ class Simulator:
         return dt.datetime.combine(self.day0, dt.time()) + dt.timedelta(seconds=self.now)
 
     def kpis(self) -> dict:
-        return self.kpis_.as_dict()
+        out = self.kpis_.as_dict()
+        trucks = [self.truck_kpis(i) for i in range(len(self.trucks))]
+        out["trucks"] = trucks
+        out["truck_km"] = sum(t["km"] for t in trucks)
+        out["truck_kwh"] = sum(t["kwh"] for t in trucks)
+        out["bikes_moved"] = sum(t["dropped"] for t in trucks)
+        out["batteries_swapped"] = sum(t["batteries_swapped"] for t in trucks)
+        out["operating_cost_usd"] = sum(t["cost_usd"]["total"] for t in trucks)
+        out["kgco2e"] = sum(t["kgco2e"] for t in trucks)
+        out["energy_flags"] = sum(t["energy_flags"] for t in trucks)
+        return out
 
     def check_invariants(self) -> None:
         self.fleet.check()
@@ -644,6 +658,29 @@ class Simulator:
             return "not_at_depot"
         return ""
 
+    def _energy(self, tr: Truck, kwh: float) -> None:
+        """Energy is a KPI (D20); flag a van that uses more than its battery between depot visits."""
+        tr.kwh += kwh
+        tr.kwh_since_depot += kwh
+        if tr.kwh_since_depot > self.config.vehicle.usable_kwh and not tr.over_battery:
+            tr.over_battery = True
+            tr.energy_flags += 1
+
+    def truck_kpis(self, truck: int) -> dict:
+        """Per-truck KPIs since reset: km, time split, bikes moved, swaps, kWh, cost (USD), CO2e."""
+        tr = self.trucks[truck]
+        shift_s = self.now - self._t0
+        busy = tr.drive_s + tr.service_s + tr.wait_s
+        if tr.busy:   # do not count the part of the current command that is still to come
+            busy -= max(0.0, tr.eta - self.now)
+        hours = shift_s / 3600.0
+        return {"km": tr.km, "drive_s": tr.drive_s, "service_s": tr.service_s, "wait_s": tr.wait_s,
+                "idle_s": max(0.0, shift_s - busy), "commands": tr.commands_done, "picked_up": tr.picked,
+                "dropped": tr.dropped, "batteries_swapped": tr.swapped, "kwh": tr.kwh,
+                "kwh_since_depot": tr.kwh_since_depot, "energy_flags": tr.energy_flags,
+                "cost_usd": self.costs.cost_usd(tr.kwh, hours, tr.km, tr.swapped),
+                "kgco2e": self.costs.kgco2e(tr.kwh)}
+
     def _busy_until(self, tr: Truck, t: float) -> None:
         tr.eta = t
         self.queue.push(t, TRUCK, tr.id, tr.serial)
@@ -652,6 +689,7 @@ class Simulator:
         tr.planned = k
         dur = self.config.trucks.stop_overhead_s + k * per_bike
         tr.service_s += dur
+        self._energy(tr, self.van.service_kwh(dur))
         self._busy_until(tr, self.now + dur)
 
     def _finish(self, tr: Truck, requested: int, executed: int, reason: str = "") -> None:
@@ -665,12 +703,15 @@ class Simulator:
             stop = cmd.node if isinstance(cmd, GoTo) else self.depot_stop
             dest = self._b2d[stop] if isinstance(cmd, GoTo) else self.depot_drive
             t = self.travel.time(tr.drive_node, dest, self.now)
-            tr.km += self.travel.distance(tr.drive_node, dest) / 1000.0
+            d = self.travel.distance(tr.drive_node, dest)
+            tr.km += d / 1000.0
             tr.drive_s += t
+            self._energy(tr, self.van.drive_kwh(d, t, len(tr.load)))
             tr.target = (stop, dest)
             self._busy_until(tr, self.now + t)
         elif isinstance(cmd, Wait):
             tr.wait_s += cmd.seconds
+            self._energy(tr, self.van.service_kwh(cmd.seconds))
             self._busy_until(tr, self.now + cmd.seconds)
         elif isinstance(cmd, PickUp):
             room = tc.capacity - len(tr.load)
@@ -699,6 +740,7 @@ class Simulator:
             self._service(tr, k, tc.swap_per_bike_s)
         elif isinstance(cmd, Restock):
             tr.service_s += tc.depot_restock_s
+            self._energy(tr, self.van.service_kwh(tc.depot_restock_s))
             self._busy_until(tr, self.now + tc.depot_restock_s)
         return True
 
@@ -707,6 +749,9 @@ class Simulator:
         if isinstance(cmd, (GoTo, ToDepot)):
             tr.stop, tr.drive_node = tr.target
             tr.target = None
+            if tr.stop == self.depot_stop:   # a depot visit: a low van would be swapped here (D20)
+                tr.kwh_since_depot = 0.0
+                tr.over_battery = False
             self._finish(tr, 1, 1)
         elif isinstance(cmd, Wait):
             self._finish(tr, 1, 1)
