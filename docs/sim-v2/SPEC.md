@@ -403,6 +403,22 @@ each forecast provider ships with tests (#29) run on simulated and on held-out 2
 - **Sharpness** reported next to `destination` (oracle) and `none`, so the cost of not knowing
   destinations is measured, not assumed.
 
+**Implementation (#127–#130, `bss_sim.info`, `bss_sim.forecast`).**
+- **Interface**: `sim.observe()` gives the observation; `sim.forecast(window_s, partition, provider)`
+  gives departures and arrivals per group, with `provider` = `mean` (analytic), `sampled` (K scenarios
+  from the `forecast` stream) or `oracle` (needs `allow_oracle`).
+- **Ride times** between places are tabulated per bike type:
+  - for generated demand, from the generator's own mixture over node pairs;
+  - for replayed demand, from the model fitted to recorded durations.
+- **Served shares**: only served requests become arrivals, so the forecast uses the observed served
+  shares (city and outside separately).
+- **Demand level**: the forecast estimates the current level from the requests of the last 6 h against
+  the model, with a Gamma prior of 50 requests. The model's day noise and trends within a month are
+  not otherwise known; the sampled forecast draws the level from its posterior.
+- **Calibration check**: `bss_sim.forecast_check` runs in CI on a synthetic bundle;
+  `scripts/validate_forecast.py` reports on real bundles:
+  [`reports/forecast-calibration.md`](reports/forecast-calibration.md).
+
 ---
 
 ## 9. Operators (trucks)

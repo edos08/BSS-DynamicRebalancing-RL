@@ -15,18 +15,19 @@ Providers (same output type, :class:`Forecast`):
 * ``"oracle"``: the simulator's own future requests and true destinations; ablation only, needs
   ``info.allow_oracle`` and is recorded in the run metadata.
 
-**What the forecast knows.** The demand model (hourly OD rates, monthly level; the day's own noise
-is unknown, so its mean 1 is used), the ride-time model, the spreader, the observed service level
-of requests starting in the city and from outside (only served requests become arrivals), and the
-trips in progress
+**What the forecast knows.** The demand model (hourly OD rates, monthly level), the **current
+demand level** estimated from the requests of the last hours (:meth:`ForecastContext.level`; the
+day's own level and trends within a month are not in the model), the ride-time model, the spreader, the observed share of requests that got a bike (per origin place
+over the recent window, and from outside; only served requests become arrivals), the observed mean
+time users walk to their bike (a ride starts after it), and the trips in progress
 at the configured level. It never reads the simulator's queue or its future requests (except the
 oracle).
 
-**Ride times between places** (:class:`RideTimeTable`): the generator draws a ride time from the
-distance between the two *nodes* a request is spread to, so the distribution between two places is
-a mixture over node pairs. It is tabulated once by sampling the generator's own code
-(``DemandModel.nodes_and_times``), per bike type, origin and destination place, on a 60 s grid up
-to 6 h.
+**Ride times between places** (:class:`RideTimeTable`), tabulated once per bike type, origin and
+destination place on a 60 s grid up to 6 h. With generated demand, the generator draws a ride from
+the distance between the two *nodes* a request is spread to, so the distribution is a mixture over
+node pairs, sampled with the generator's own code. With replayed (recorded) trips, rides follow the
+model fitted to recorded durations at the station-to-station distance (calibration, #130).
 
 **Trips in progress** (spec §8.1). A trip from place ``o`` started at ``s``, running for
 ``a = now - s``, arrives in group ``g`` within the window with probability
@@ -68,13 +69,34 @@ class Forecast:
 
 
 class RideTimeTable:
-    """CDF of ride times between places, ``F[kind, o, d, t / STEP_S]``, for in-city places."""
+    """CDF of ride times between places, ``F[kind, o, d, t / STEP_S]``, for in-city places.
 
-    def __init__(self, model, samples: int = 128, seed: int = 0x7AB1E):
+    ``source="generator"``: the mixture over node pairs that ``PoissonDemand`` draws from (sampled
+    with its own code). ``source="stations"``: the ride-time model at the distance between the two
+    stations, i.e. the distribution fitted to **recorded** durations; this is what replayed trips
+    follow (and what an operator would use on real data).
+    """
+
+    def __init__(self, model, samples: int = 128, seed: int = 0x7AB1E, source: str = "generator"):
         P = model.n_places - 1
+        n_grid = int(TMAX_S / STEP_S) + 1
+        self.n_grid = n_grid
+        self.source = source
+        if source == "stations":
+            st = model.spreader.station_nodes
+            dist = np.asarray(model.bike_dist[np.ix_(st, st)], dtype=np.float64)
+            np.fill_diagonal(dist, 0.0)                      # same place: round trip
+            grid = np.arange(n_grid) * STEP_S
+            F = np.empty((2, P, P, n_grid), dtype=np.float32)
+            for k in (0, 1):
+                F[k] = model.ride_times.cdf(grid[None, None, :], dist[:, :, None], k).astype(np.float32)
+            F[..., -1] = 1.0
+            self.F = F
+            return
+        if source != "generator":
+            raise ValueError(f"unknown ride-time table source {source!r}")
         rng = np.random.default_rng(seed)
         o, d = np.divmod(np.arange(P * P), P)
-        n_grid = int(TMAX_S / STEP_S) + 1
         F = np.empty((2, P, P, n_grid), dtype=np.float32)
         for k in (0, 1):
             oo = np.repeat(o, samples).astype(np.int16)
@@ -87,7 +109,6 @@ class RideTimeTable:
             np.add.at(counts, (np.repeat(np.arange(P * P), samples), bins), 1.0)
             F[k] = (np.cumsum(counts, axis=1)[:, :n_grid] / samples).reshape(P, P, n_grid)
         self.F = F
-        self.n_grid = n_grid
 
     def at(self, t: np.ndarray | float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Grid index and interpolation weight for times ``t`` (clamped to the table)."""
@@ -131,11 +152,14 @@ class ForecastContext:
         self.ext = m.external
         self._table: RideTimeTable | None = None
         self._W: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._level: tuple[float, tuple[float, float, float]] | None = None
 
     @property
     def table(self) -> RideTimeTable:
+        """Ride times as the demand in use produces them: generated (node mixture) or recorded."""
         if self._table is None:
-            self._table = RideTimeTable(self.model)
+            replay = self.sim.config.demand.generator == "replay"
+            self._table = RideTimeTable(self.model, source="stations" if replay else "generator")
         return self._table
 
     def W(self, name: str) -> tuple[np.ndarray, np.ndarray]:
@@ -151,22 +175,96 @@ class ForecastContext:
             self._W[name] = (W, part.node_to_group)
         return self._W[name]
 
-    def rates_at(self, t: float) -> np.ndarray:
-        """Expected requests per second ``[P+1, P+1]`` at clock time ``t`` (day noise at its mean)."""
+    def base_rates(self, t: float) -> np.ndarray:
+        """Model rates (requests per second ``[P+1, P+1]``) at clock time ``t``, at the monthly level."""
         sim = self.sim
         day, sec = divmod(t, 86400.0)
         date = sim.day0 + dt.timedelta(days=int(day))
         m = self.model
         return m.rates[m.group(date), int(sec // 3600)].astype(np.float64) * m.month(date) / 3600.0
 
+    def rates_at(self, t: float) -> np.ndarray:
+        """Expected requests per second at ``t``: model rates times the estimated current level."""
+        return self.base_rates(t) * self.level()[0]
+
+    def level(self) -> tuple[float, float, float]:
+        """Current demand level relative to the model: ``(posterior mean, observed, expected)``.
+
+        Requests made in the city during the last ``info.level_window_s`` (an operator sees them in
+        its app, served or not) against what the model expects at its monthly level, with a Gamma
+        prior of mean 1 and strength ``info.level_prior`` requests:
+        ``level = (observed + prior) / (expected + prior)``. It captures the day's own level (the
+        model's day noise) and trends within a month (e.g. early vs late December)."""
+        sim = self.sim
+        info = sim.config.info
+        if self._level is not None and self._level[0] == sim.now:
+            return self._level[1]
+        start = max(0.0, sim.now - info.level_window_s, sim._t0)
+        observed = 0.0
+        expected = 0.0
+        if sim.now > start:
+            first, last = int(start // 3600), int(sim.now // 3600)
+            for slot in range(first, last + 1):
+                lo, hi = max(start, slot * 3600.0), min(sim.now, (slot + 1) * 3600.0)
+                if hi <= lo:
+                    continue
+                expected += float(self.base_rates(lo)[:self.P].sum()) * (hi - lo)
+                n = sim._slot_requests.get(slot, 0)
+                if slot * 3600.0 < start:   # first slot only partly in the window: take the share
+                    n *= (hi - lo) / max(hi - max(slot * 3600.0, sim._t0), 1e-9)
+                observed += n
+        k = info.level_prior
+        out = ((observed + k) / (expected + k), observed, expected)
+        self._level = (sim.now, out)
+        return out
+
+    def sample_level(self, rng: np.random.Generator) -> float:
+        """A draw of the level from its Gamma posterior (shape observed + prior, rate expected + prior)."""
+        _, observed, expected = self.level()
+        k = self.sim.config.info.level_prior
+        return float(rng.gamma(observed + k, 1.0 / (expected + k)))
+
     def served_fraction(self) -> float:
-        """Observed share of requests starting in the city that got a bike (1 before any request)."""
-        k = self.sim.kpis_
+        """Share of requests starting in the city that got a bike, over the same recent window as the
+        level (service varies over the day); all requests so far when the window has none."""
+        sim = self.sim
+        first = int(max(0.0, sim.now - sim.config.info.level_window_s) // 3600)
+        req = sum(n for slot, n in sim._slot_requests.items() if slot >= first)
+        if req:
+            return sum(n for slot, n in sim._slot_served.items() if slot >= first) / req
+        k = sim.kpis_
         return k.city_served / k.city_requests if k.city_requests else 1.0
 
-    def served_fraction_external(self) -> float:
-        """Observed share of requests from outside that got a bike (the reservoir can run empty)."""
+    def served_by_origin(self, prior: float = 20.0) -> np.ndarray:
+        """``[P]`` share of requests from each in-city place that got a bike, over the recent window,
+        shrunk towards the overall share with ``prior`` requests (failures concentrate where bikes
+        are short, and those places have their own trip lengths)."""
+        sim = self.sim
+        first = int(max(0.0, sim.now - sim.config.info.level_window_s) // 3600)
+        req = np.array(sim._place_req[:self.P], dtype=np.float64)
+        srv = np.array(sim._place_served[:self.P], dtype=np.float64)
+        for slot, (r, v) in sim._place_hist.items():
+            if slot >= first:
+                req += r[:self.P]
+                srv += v[:self.P]
+        overall = self.served_fraction()
+        return (srv + prior * overall) / (req + prior)
+
+    def walk_delay(self) -> float:
+        """Mean time from request to the start of the ride (walking to the bike), observed so far."""
         k = self.sim.kpis_
+        return k.walk_m_sum / self.sim.config.users.walking_speed_mps / k.city_served if k.city_served else 0.0
+
+    def served_fraction_external(self) -> float:
+        """Share of requests from outside that got a bike over the recent window (the reservoir can
+        run empty as a run goes on); 1 before any such request."""
+        sim = self.sim
+        first = int(max(0.0, sim.now - sim.config.info.level_window_s) // 3600)
+        req = sum(n for slot, n in sim._ext_req.items() if slot >= first)
+        srv = sum(n for slot, n in sim._ext_served.items() if slot >= first)
+        if req:
+            return srv / req
+        k = sim.kpis_
         n = k.requests - k.city_requests - k.skipped_external_both
         return k.from_external / n if n else 1.0
 
@@ -188,15 +286,16 @@ def mean_forecast(ctx: ForecastContext, window: float, partition: str, level: st
     W, _ = ctx.W(partition)
     G = W.shape[1]
     now, end = sim.now, sim.now + window
-    sf, e, D = ctx.served_fraction(), ctx.ebike_share(), ctx.ext_delay()
+    sf, e, D = ctx.served_by_origin(), ctx.ebike_share(), ctx.ext_delay()
+    wd = ctx.walk_delay()
     dep = np.zeros(G)
     new = np.zeros(G)
     starts, step = _starts(now, window)
     for s in starts:
         lam = ctx.rates_at(s) * step
         dep += lam[:P].sum(axis=1) @ W
-        Fm = ctx.table.cdf_all(end - s, e)
-        new += (sf * (lam[:P, :P] * Fm).sum(axis=0)) @ W
+        Fm = ctx.table.cdf_all(max(end - s - wd, 0.0), e)
+        new += ((sf[:, None] * lam[:P, :P]) * Fm).sum(axis=0) @ W
         if end - s >= D:
             new += ctx.served_fraction_external() * lam[ext, :P] @ W
     infl = inflight_mean(ctx, window, partition, level)
@@ -207,7 +306,7 @@ def _model_inflight(ctx: ForecastContext, window: float, W: np.ndarray) -> tuple
     """Expected arrivals per group from trips in progress, and their expected number, under the model."""
     sim, P, ext = ctx.sim, ctx.P, ctx.ext
     now = sim.now
-    sf, e, D = ctx.served_fraction(), ctx.ebike_share(), ctx.ext_delay()
+    sf, e, D = ctx.served_by_origin(), ctx.ebike_share(), ctx.ext_delay()
     arr = np.zeros(W.shape[1])
     n_in = 0.0
     ages = (np.arange(int(TMAX_S / QUAD_S)) + 0.5) * QUAD_S
@@ -217,7 +316,7 @@ def _model_inflight(ctx: ForecastContext, window: float, W: np.ndarray) -> tuple
         lam = ctx.rates_at(now - a) * QUAD_S
         Fa = ctx.table.cdf_all(a, e)
         Fah = ctx.table.cdf_all(a + window, e)
-        city = sf * lam[:P, :P]
+        city = sf[:, None] * lam[:P, :P]
         n_in += float((city * (1 - Fa)).sum())
         arr += (city * (Fah - Fa)).sum(axis=0) @ W
         if a < D:                # from outside: in flight until D, arrives within the window if D - a <= h
@@ -271,19 +370,19 @@ def inflight_mean(ctx: ForecastContext, window: float, partition: str, level: st
 def sampled_forecast(ctx: ForecastContext, window: float, partition: str, level: str, K: int,
                      rng: np.random.Generator) -> Forecast:
     """``K`` scenarios of the window, drawn with the run's ``forecast`` stream."""
-    from bss_sim.demand import PoissonDemand
-
     sim, ext = ctx.sim, ctx.ext
     W, node_group = ctx.W(partition)
     G = W.shape[1]
     now, end = sim.now, sim.now + window
-    sf, sf_ext, D = ctx.served_fraction(), ctx.served_fraction_external(), ctx.ext_delay()
+    sf, sf_ext, D = ctx.served_by_origin(), ctx.served_fraction_external(), ctx.ext_delay()
+    wd = ctx.walk_delay()
     dep = np.zeros((K, G))
     new = np.zeros((K, G))
     infl = np.zeros((K, G))
     first, last = int(now // 3600), int(np.ceil(end / 3600))
     for k in range(K):
-        gen = PoissonDemand(ctx.model, seed=int(rng.integers(2**63)))   # own day level and requests
+        drawn = ctx.sample_level(rng)
+        gen = _LevelDemand(ctx.model, int(rng.integers(2**63)), drawn)   # own requests at a drawn level
         for slot in range(first, last):
             date = sim.day0 + dt.timedelta(days=slot // 24)
             r = gen.hour(date, slot % 24)
@@ -293,15 +392,29 @@ def sampled_forecast(ctx: ForecastContext, window: float, partition: str, level:
             g = node_group[r.o_node[city]]
             np.add.at(dep[k], g[g >= 0], 1.0)
             u = rng.random(len(t))
-            served = city & (r.d_place != ext) & (u < sf)
-            from_out = win & (r.o_place == ext) & (r.d_place != ext) & (u < sf_ext)
+            share = np.where(r.o_place != ext, sf[np.minimum(r.o_place, len(sf) - 1)], sf_ext)
+            served = city & (r.d_place != ext) & (u < share)
+            from_out = win & (r.o_place == ext) & (r.d_place != ext) & (u < share)
             arr_t = np.where(r.o_place == ext, t + np.where(np.isfinite(r.ride_time_s), r.ride_time_s, D),
-                             t + np.nan_to_num(r.ride_time_s))
+                             t + wd + np.nan_to_num(r.ride_time_s))
             hit = (served | from_out) & (arr_t <= end)
             g = node_group[r.d_node[hit]]
             np.add.at(new[k], g[g >= 0], 1.0)
         infl[k] = _inflight_sample(ctx, window, partition, level, rng)
     return Forecast(now, window, partition, "sampled", level, dep, new + infl, new, infl)
+
+
+class _LevelDemand:
+    """``PoissonDemand`` whose day level is the model's monthly level times a given multiplier."""
+
+    def __new__(cls, model, seed: int, level: float):
+        from bss_sim.demand import PoissonDemand
+
+        class LevelPoisson(PoissonDemand):
+            def day_factor(self, date):
+                return self.model.month(date) * level
+
+        return LevelPoisson(model, seed=seed)
 
 
 def _place_node(ctx: ForecastContext, place: int, rng: np.random.Generator) -> int:
@@ -366,7 +479,7 @@ def _composition(ctx: ForecastContext, window: float) -> tuple[np.ndarray, np.nd
     Cells are ``age x origin x destination`` flattened with the destination last (so ``i % (P+1)``
     is the destination place); origin ``EXTERNAL`` included."""
     sim, P, ext = ctx.sim, ctx.P, ctx.ext
-    sf, e, D = ctx.served_fraction(), ctx.ebike_share(), ctx.ext_delay()
+    sf, e, D = ctx.served_by_origin(), ctx.ebike_share(), ctx.ext_delay()
     comp, parr = [], []
     ages = (np.arange(int(TMAX_S / QUAD_S)) + 0.5) * QUAD_S
     for a in ages:
@@ -377,7 +490,7 @@ def _composition(ctx: ForecastContext, window: float) -> tuple[np.ndarray, np.nd
         Fah = ctx.table.cdf_all(a + window, e)
         c = np.zeros((P + 1, P + 1))
         q = np.zeros((P + 1, P + 1))
-        c[:P, :P] = sf * lam[:P, :P] * (1 - Fa)
+        c[:P, :P] = sf[:, None] * lam[:P, :P] * (1 - Fa)
         with np.errstate(invalid="ignore", divide="ignore"):
             q[:P, :P] = np.where(1 - Fa > 0, (Fah - Fa) / (1 - Fa), 0.0)
         if a < D:
