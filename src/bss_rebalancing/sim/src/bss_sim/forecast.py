@@ -10,7 +10,10 @@
 Providers (same output type, :class:`Forecast`):
 
 * ``"mean"`` (:func:`mean_forecast`): expectations from the demand model, analytic;
-* ``"sampled"`` and ``"oracle"``: #129.
+* ``"sampled"`` (:func:`sampled_forecast`): ``K`` scenarios drawn with the run's independent
+  ``forecast`` stream (arrays ``[K, G]``);
+* ``"oracle"``: the simulator's own future requests and true destinations; ablation only, needs
+  ``info.allow_oracle`` and is recorded in the run metadata.
 
 **What the forecast knows.** The demand model (hourly OD rates, monthly level; the day's own noise
 is unknown, so its mean 1 is used), the ride-time model, the spreader, the observed service level
@@ -263,3 +266,149 @@ def inflight_mean(ctx: ForecastContext, window: float, partition: str, level: st
         if alive > 0:
             out += (p * (Fah - Fa) / alive) @ W
     return out
+
+
+def sampled_forecast(ctx: ForecastContext, window: float, partition: str, level: str, K: int,
+                     rng: np.random.Generator) -> Forecast:
+    """``K`` scenarios of the window, drawn with the run's ``forecast`` stream."""
+    from bss_sim.demand import PoissonDemand
+
+    sim, ext = ctx.sim, ctx.ext
+    W, node_group = ctx.W(partition)
+    G = W.shape[1]
+    now, end = sim.now, sim.now + window
+    sf, sf_ext, D = ctx.served_fraction(), ctx.served_fraction_external(), ctx.ext_delay()
+    dep = np.zeros((K, G))
+    new = np.zeros((K, G))
+    infl = np.zeros((K, G))
+    first, last = int(now // 3600), int(np.ceil(end / 3600))
+    for k in range(K):
+        gen = PoissonDemand(ctx.model, seed=int(rng.integers(2**63)))   # own day level and requests
+        for slot in range(first, last):
+            date = sim.day0 + dt.timedelta(days=slot // 24)
+            r = gen.hour(date, slot % 24)
+            t = r.t_s + (slot // 24) * 86400.0
+            win = (t > now) & (t <= end)
+            city = win & (r.o_place != ext)
+            g = node_group[r.o_node[city]]
+            np.add.at(dep[k], g[g >= 0], 1.0)
+            u = rng.random(len(t))
+            served = city & (r.d_place != ext) & (u < sf)
+            from_out = win & (r.o_place == ext) & (r.d_place != ext) & (u < sf_ext)
+            arr_t = np.where(r.o_place == ext, t + np.where(np.isfinite(r.ride_time_s), r.ride_time_s, D),
+                             t + np.nan_to_num(r.ride_time_s))
+            hit = (served | from_out) & (arr_t <= end)
+            g = node_group[r.d_node[hit]]
+            np.add.at(new[k], g[g >= 0], 1.0)
+        infl[k] = _inflight_sample(ctx, window, partition, level, rng)
+    return Forecast(now, window, partition, "sampled", level, dep, new + infl, new, infl)
+
+
+def _place_node(ctx: ForecastContext, place: int, rng: np.random.Generator) -> int:
+    return int(ctx.model.spreader.sample(np.array([place]), rng.random(1))[0])
+
+
+def _inflight_sample(ctx: ForecastContext, window: float, partition: str, level: str,
+                     rng: np.random.Generator) -> np.ndarray:
+    sim, P, ext = ctx.sim, ctx.P, ctx.ext
+    W, node_group = ctx.W(partition)
+    out = np.zeros(W.shape[1])
+    now, end = sim.now, sim.now + window
+    D = ctx.ext_delay()
+
+    def land(place: int) -> None:
+        g = node_group[_place_node(ctx, place, rng)]
+        if g >= 0:
+            out[g] += 1.0
+
+    if level == "destination":
+        fl = sim._inflight(level)
+        g = node_group[fl.d_node]
+        hit = (fl.end_t <= end) & (g >= 0)
+        np.add.at(out, g[hit], 1.0)
+        return out
+    if level == "origin":
+        fl = sim._inflight(level)
+        for o, s, k in zip(fl.o_place.tolist(), fl.start_t.tolist(), fl.kind.tolist()):
+            lam = ctx.rates_at(s)
+            if o == ext:
+                p = lam[ext, :P]
+                if now < s + D <= end and p.sum() > 0:
+                    land(int(rng.choice(P, p=p / p.sum())))
+                continue
+            a = now - s
+            p = lam[o, :P]
+            Fa = ctx.table.cdf(k, o, np.arange(P), np.full(P, a))
+            w = p * (1 - Fa)
+            if w.sum() <= 0:
+                continue
+            d = int(rng.choice(P, p=w / w.sum()))
+            u = float(Fa[d]) + rng.random() * (1.0 - float(Fa[d]))   # ride time given still riding at a
+            if ctx.table.inverse(k, o, d, u) - a <= window:
+                land(d)
+        return out
+    # count / none: trips in progress drawn from the model's composition
+    comp, p_arr = _composition(ctx, window)
+    total = comp.sum()
+    if total <= 0:
+        return out
+    n = sim._inflight("count").count if level == "count" else int(rng.poisson(total))
+    idx = rng.choice(len(comp), size=n, p=comp / total)
+    for i in idx.tolist():
+        if rng.random() < p_arr[i]:
+            land(i % (P + 1) if i % (P + 1) < P else 0)
+    return out
+
+
+def _composition(ctx: ForecastContext, window: float) -> tuple[np.ndarray, np.ndarray]:
+    """Expected trips in progress by destination-tagged cell, and each cell's arrival probability.
+
+    Cells are ``age x origin x destination`` flattened with the destination last (so ``i % (P+1)``
+    is the destination place); origin ``EXTERNAL`` included."""
+    sim, P, ext = ctx.sim, ctx.P, ctx.ext
+    sf, e, D = ctx.served_fraction(), ctx.ebike_share(), ctx.ext_delay()
+    comp, parr = [], []
+    ages = (np.arange(int(TMAX_S / QUAD_S)) + 0.5) * QUAD_S
+    for a in ages:
+        if sim.now - a < 0:
+            break
+        lam = ctx.rates_at(sim.now - a) * QUAD_S
+        Fa = ctx.table.cdf_all(a, e)
+        Fah = ctx.table.cdf_all(a + window, e)
+        c = np.zeros((P + 1, P + 1))
+        q = np.zeros((P + 1, P + 1))
+        c[:P, :P] = sf * lam[:P, :P] * (1 - Fa)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            q[:P, :P] = np.where(1 - Fa > 0, (Fah - Fa) / (1 - Fa), 0.0)
+        if a < D:
+            c[ext, :P] = ctx.served_fraction_external() * lam[ext, :P]
+            q[ext, :P] = 1.0 if D - a <= window else 0.0
+        comp.append(c.ravel())
+        parr.append(q.ravel())
+    if not comp:
+        return np.zeros(1), np.zeros(1)
+    return np.concatenate(comp), np.concatenate(parr)
+
+
+def oracle_forecast(ctx: ForecastContext, window: float, partition: str) -> Forecast:
+    """The simulator's own future requests (served or not) and the true trips in progress."""
+    sim, ext = ctx.sim, ctx.ext
+    W, node_group = ctx.W(partition)
+    G = W.shape[1]
+    now, end = sim.now, sim.now + window
+    dep, new = np.zeros(G), np.zeros(G)
+    if sim.demand is not None:
+        for slot in range(int(now // 3600), int(np.ceil(end / 3600))):
+            date = sim.day0 + dt.timedelta(days=slot // 24)
+            r = sim.demand.hour(date, slot % 24)
+            t = r.t_s + (slot // 24) * 86400.0
+            win = (t > now) & (t <= end)
+            city = win & (r.o_place != ext)
+            g = node_group[r.o_node[city]]
+            np.add.at(dep, g[g >= 0], 1.0)
+            ride = np.where(np.isfinite(r.ride_time_s), r.ride_time_s, ctx.ext_delay())
+            hit = win & (r.d_place != ext) & (t + ride <= end)
+            g = node_group[r.d_node[hit]]
+            np.add.at(new, g[g >= 0], 1.0)
+    infl = _inflight_sample(ctx, window, partition, "destination", np.random.default_rng(0))
+    return Forecast(now, window, partition, "oracle", "destination", dep, new + infl, new, infl)

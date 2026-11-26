@@ -186,6 +186,7 @@ class Simulator:
         self._user_seed = self.streams.int_seed("users")
         self._ext_rng = self.streams.generator("external")
         self.travel.bind(self.streams.generator("travel"), self.day0)
+        self._fc_rng = self.streams.generator("forecast")
         self._t0 = self.now
         self._init_trucks()
         self._init_fleet(snapshot)
@@ -320,7 +321,8 @@ class Simulator:
 
     def forecast(self, window_s: float, partition: str, provider: str = "mean", samples: int = 100):
         """Departures and arrivals per group of ``partition`` in ``(now, now + window_s]``
-        (:mod:`bss_sim.forecast`). ``provider``: ``mean`` (``sampled`` and ``oracle``: #129)."""
+        (:mod:`bss_sim.forecast`). ``provider``: ``mean`` | ``sampled`` (``samples`` scenarios) |
+        ``oracle`` (needs ``info.allow_oracle``)."""
         from bss_sim import forecast as fc
 
         if partition not in self._parts:
@@ -332,6 +334,13 @@ class Simulator:
         level = self.config.info.inflight_knowledge
         if provider == "mean":
             return fc.mean_forecast(self._fc, window_s, partition, level)
+        if provider == "sampled":
+            return fc.sampled_forecast(self._fc, window_s, partition, level, samples, self._fc_rng)
+        if provider == "oracle":
+            if not self.config.info.allow_oracle:
+                raise PermissionError("the oracle forecast needs info.allow_oracle: true (ablations only)")
+            self.oracle_used = True
+            return fc.oracle_forecast(self._fc, window_s, partition)
         raise ValueError(f"unknown forecast provider {provider!r}")
 
     def observe(self) -> Observation:
