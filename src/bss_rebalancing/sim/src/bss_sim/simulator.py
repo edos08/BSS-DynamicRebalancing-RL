@@ -11,6 +11,10 @@ sim.kpis()
 the requests are then read in time order from that batch, without going through the heap.
 A request from the city is handled by the user model (§7.1): a bike is reserved and
 ``TripStart`` follows after the walk; ``TripEnd`` parks the bike at the destination.
+In **docked** mode (§7.1 item 4) bikes live at station nodes only; a user arriving at a full
+station rides on to the nearest station with a free dock (``NO_DOCK`` is recorded when that is
+farther than ``users.redirect_radius_m``; if every station is full the bike is left at the
+original one and counted as ``dock_overflow``).
 EXTERNAL ends use the reservoir (§6.5): a trip to outside makes the bike leave at ``TripStart``;
 a request from outside takes a bike from the reservoir, which arrives at its destination after
 the recorded or generated ride time (``external.ride_time_s`` when unknown).
@@ -31,14 +35,15 @@ import numpy as np
 from bss_sim.config import SimConfig
 from bss_sim.demand import PoissonDemand, ReplayDemand
 from bss_sim.energy import Battery
-from bss_sim.engine import (SLOT_START, TRIP_END, TRIP_REQUEST, TRIP_START, WAKEUP, EventQueue,
+from bss_sim.engine import (REDIRECT, SLOT_START, TRIP_END, TRIP_REQUEST, TRIP_START, WAKEUP, EventQueue,
                             Notification, Until)
 from bss_sim.rng import Streams
 from bss_sim.scenario import Scenario
 from bss_sim.state import ELECTRIC, RESERVED, RIDING, Fleet, initial_nodes
-from bss_sim.users import EXTERNAL_EMPTY, REASONS, REQUEST_FAILURES, SERVED, WalkingUsers
+from bss_sim.users import EXTERNAL_EMPTY, NO_DOCK, REASONS, REQUEST_FAILURES, SERVED, WalkingUsers
 
 USER_SLOT_STREAM = 0x5E5
+REDIRECT_FALLBACK_SPEED_MPS = 3.5  # riding pace on to another dock when the trip's own pace is unknown
 
 
 def _parse_start(start) -> dt.datetime:
@@ -66,6 +71,9 @@ class Kpis:
         self.ebike_km = 0.0               # of which on e-bikes (battery used / consumption)
         self.to_external = 0
         self.from_external = 0
+        self.redirects = 0                # docked: rides on to another station because of a full one
+        self.redirect_km = 0.0
+        self.dock_overflow = 0            # docked: every station full, bike left over capacity
 
     def as_dict(self) -> dict:
         failed = {REASONS[r]: self.failures[r] for r in REQUEST_FAILURES}
@@ -86,6 +94,10 @@ class Kpis:
             "to_external": self.to_external,
             "from_external": self.from_external,
             "skipped_external_both": self.skipped_external_both,
+            "redirects": self.redirects,
+            "no_dock": self.failures[NO_DOCK],
+            "redirect_km": self.redirect_km,
+            "dock_overflow": self.dock_overflow,
         }
 
 
@@ -109,6 +121,20 @@ class Simulator:
         self._ebike_share = (config.fleet.ebike_share if config.fleet.ebike_share is not None
                              else scenario.demand.ebike_share)
         self.fleet: Fleet | None = None
+        self._docked = config.mode == "docked"
+        if self._docked:
+            self._init_docks()
+
+    def _init_docks(self) -> None:
+        """Capacity per node and, for every station node, the other station nodes by riding distance."""
+        cap = self.scenario.node_capacity()
+        self._cap: list[int] = cap.tolist()
+        st = np.unique(self.scenario.station_node)
+        d = self._dist[np.ix_(st, st)].astype(np.float64)
+        self._dock_order: dict[int, list[tuple[int, float]]] = {}
+        for i, node in enumerate(st.tolist()):
+            order = np.argsort(d[i], kind="stable")
+            self._dock_order[node] = [(int(st[j]), float(d[i, j])) for j in order if j != i]
 
     @classmethod
     def from_scenario(cls, root: str | Path, config: SimConfig | None = None, **kw) -> Simulator:
@@ -171,7 +197,9 @@ class Simulator:
                 raise ValueError(f"snapshot has {len(nodes)} bikes, fleet.size is {n_city}")
         elif dist == "proportional_to_demand":
             nodes = initial_nodes(rng, n_city, sc.departure_weights(), capacity)
-        else:  # uniform over the nodes where demand can start (station nodes in docked mode)
+        elif capacity is not None:  # uniform, docked: the same share of docks filled everywhere
+            nodes = initial_nodes(rng, n_city, capacity.astype(np.float64), capacity)
+        else:  # uniform, dockless: over the nodes where demand can start
             w = (sc.departure_weights() > 0).astype(np.float64)
             nodes = initial_nodes(rng, n_city, w, capacity)
         # city bikes are 0..n_city-1; the reservoir keeps the others
@@ -200,6 +228,11 @@ class Simulator:
 
     def check_invariants(self) -> None:
         self.fleet.check()
+        if self._docked:
+            nb = self.fleet.n_bikes
+            cap = np.asarray(self._cap)
+            assert nb[cap == 0].sum() == 0, "docked mode: bikes outside stations"
+            assert np.maximum(nb - cap, 0).sum() <= self.kpis_.dock_overflow, "docked mode: station over capacity"
 
     def event_log(self) -> dict[str, np.ndarray]:
         """The event log as arrays (``telemetry.event_log`` must be on)."""
@@ -352,7 +385,42 @@ class Simulator:
 
     def _trip_end(self, bike: int) -> None:
         node = int(self._trip_dest[bike])
+        if self._docked and self.fleet.n_bikes[node] >= self._cap[node] and self._redirect(bike, node):
+            return
         self.fleet.park(bike, node)
         self.kpis_.trips_ended += 1
         if self.log is not None:
             self.log.append((self.now, TRIP_END, int(self._trip_req[bike]), bike, node, SERVED))
+
+    def _redirect(self, bike: int, node: int) -> bool:
+        """Docked mode, ``node`` full: ride on to the nearest station with a free dock.
+
+        Returns False when every station is full (the bike is then left at ``node``)."""
+        nb, cap = self.fleet.n_bikes, self._cap
+        for alt, extra_m in self._dock_order[node]:
+            if nb[alt] < cap[alt]:
+                break
+        else:
+            self.kpis_.dock_overflow += 1
+            return False
+        k = self.kpis_
+        k.redirects += 1
+        if extra_m > self.config.users.redirect_radius_m:
+            k.failures[NO_DOCK] += 1
+        extra_km = extra_m / 1000.0
+        k.redirect_km += extra_km
+        k.ride_km += extra_km
+        f = self.fleet
+        if f.kind_l[bike] == ELECTRIC:
+            f.battery_km[bike] = self.battery.after_ride(f.battery_km[bike], extra_km)
+            k.ebike_km += extra_km
+        trip_m, ride = self._trip_km[bike] * 1000.0, self._trip_ride[bike]
+        speed = trip_m / ride if trip_m > 0 and ride > 0 else REDIRECT_FALLBACK_SPEED_MPS
+        self._trip_dest[bike] = alt
+        self._trip_km[bike] = extra_km
+        self._trip_ride[bike] = extra_m / speed
+        if self.log is not None:
+            self.log.append((self.now, REDIRECT, int(self._trip_req[bike]), bike, alt,
+                             NO_DOCK if extra_m > self.config.users.redirect_radius_m else SERVED))
+        self.queue.push(self.now + extra_m / speed, TRIP_END, bike)
+        return True

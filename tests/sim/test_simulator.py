@@ -2,7 +2,7 @@ import numpy as np
 import pytest
 
 from bss_sim.config import SimConfig
-from bss_sim.engine import TRIP_END, TRIP_REQUEST, TRIP_START, OnNotification, TimeLimit
+from bss_sim.engine import REDIRECT, TRIP_END, TRIP_REQUEST, TRIP_START, OnNotification, TimeLimit
 from bss_sim.simulator import Simulator
 from bss_sim.users import EXTERNAL_EMPTY
 
@@ -125,3 +125,46 @@ def test_replay_generator_and_config_checks(bundle):
     assert s.kpis()["requests"] > 0
     with pytest.raises(ValueError, match="walk_radius_m"):
         Simulator.from_scenario(bundle, cfg(users={"walk_radius_m": 5000}))
+
+
+def docked(bundle, **kw):
+    return Simulator.from_scenario(bundle, cfg(mode="docked", telemetry={"event_log": True}, **kw))
+
+
+def test_docked_mode_keeps_bikes_at_stations_within_capacity(bundle):
+    s = docked(bundle, fleet={"size": 40})  # 3 stations x 15 docks: nearly full
+    cap = s.scenario.node_capacity()
+    assert cap.sum() == 45
+    s.reset(seed=1, start=START)
+    assert (s.fleet.n_bikes <= cap).all() and s.fleet.n_bikes[cap == 0].sum() == 0
+    s.run(TimeLimit(2 * 86400))  # invariants (incl. capacity) checked after every event
+    k = s.kpis()
+    assert k["redirects"] > 0 and k["redirect_km"] > 0
+    log = s.event_log()
+    assert (log["event"] == REDIRECT).sum() == k["redirects"]
+
+
+def test_redirect_radius_and_overflow(bundle):
+    s = docked(bundle, fleet={"size": 40}, users={"redirect_radius_m": 0})
+    s.reset(seed=1, start=START)
+    s.run(TimeLimit(86400))
+    k = s.kpis()
+    assert k["no_dock"] == k["redirects"] > 0  # every ride on to another dock is beyond 0 m
+    assert "no_dock" not in k["failures"]       # a return problem, not a failed request
+    full = docked(bundle, fleet={"size": 45}, external={"reservoir": 200})
+    full.reset(seed=2, start=START)
+    full.run(TimeLimit(86400))
+    assert full.kpis()["dock_overflow"] > 0     # all docks taken: bikes left over capacity, still counted
+
+
+def test_docked_uniform_fills_by_capacity(bundle):
+    s = docked(bundle, fleet={"size": 30, "initial_distribution": "uniform"})
+    s.reset(seed=3, start=START)
+    cap = s.scenario.node_capacity()
+    assert sorted(s.fleet.n_bikes[cap > 0].tolist()) != [0, 15, 15]  # spread, not packed
+    assert (s.fleet.n_bikes <= cap).all() and s.fleet.n_bikes.sum() == 30
+
+
+def test_docked_needs_enough_docks(bundle):
+    with pytest.raises(ValueError, match="docks"):
+        docked(bundle, fleet={"size": 46}).reset(seed=1, start=START)

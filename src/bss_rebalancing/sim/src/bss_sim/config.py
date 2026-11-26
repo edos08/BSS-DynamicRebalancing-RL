@@ -43,7 +43,7 @@ class FleetConfig:
     ebike_share: float | None = None                  # None -> share observed in the bundle's trips
     battery_range_km: float = 60.0                    # e-bike full range
     initial_battery: tuple[float, float] = (0.3, 1.0)  # uniform fraction of full range
-    initial_distribution: str = "proportional_to_demand"  # | uniform | from_snapshot
+    initial_distribution: str = "proportional_to_demand"  # | uniform (docked: by capacity) | from_snapshot
 
     def __post_init__(self):
         _check(self.size >= 0, "fleet.size must be >= 0")
