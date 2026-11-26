@@ -634,6 +634,23 @@ for the same seed (where the same RNG streams are used) or pass statistical equi
 **`bss_policies`**: `StaticTSP` (scheduled rebalancing with real truck travel and service times —
 no more instantaneous teleport), `DoNothing`, `GreedyDeficit`.
 
+Implementation (M5, #149–#154):
+- **Controllers and runner.** A controller implements `reset(sim)` and `act(sim, notes)`.
+  `run_episode` hands it the notifications (`truck_idle`, `wakeup`, `truck_resumed`) and returns the
+  KPIs.
+- **Zones.** Zones (`bss_sim.zones`) are a 300 m grid in dockless mode and station catchments in
+  docked mode.
+- **Targets.** The bikes available are shared among zones in proportion to `D + max(D − A, 0)`,
+  with `D` and `A` the forecast departures and arrivals.
+- **Routes.** Routes are capacitated pick-up and delivery tours: greedy on bikes moved per second,
+  then 2-opt, on noise-free expected drive times (`sim.expected_drive_times`).
+- **Pick-ups and drops.** Pick-ups go to a zone's fullest node. Drops are spread over its busiest
+  nodes, because users accept only short walks.
+- **The two controllers.** `StaticTSP` plans at fixed hours. `GreedyDeficit` re-plans one visit
+  whenever a truck is idle, with claims (no two trucks on one zone) and a cooldown for zones where
+  nothing could be done.
+- **Results.** [`reports/baselines.md`](reports/baselines.md).
+
 ---
 
 ## 15. Milestones
