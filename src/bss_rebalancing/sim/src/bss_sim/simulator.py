@@ -43,10 +43,10 @@ from bss_sim.partitions import Partition, PartitionCounts
 from bss_sim.rng import Streams
 from bss_sim.scenario import Scenario
 from bss_sim import telemetry
-from bss_sim.commands import Command, CommandResult, Drop, GoTo, PickUp, Restock, ToDepot, Wait
+from bss_sim.commands import Command, CommandResult, Drop, GoTo, PickUp, Restock, SwapBattery, ToDepot, Wait
 from bss_sim.state import DEPOT, ELECTRIC, ON_TRUCK, RESERVED, RIDING, Fleet, initial_nodes
 from bss_sim.travel import make_travel
-from bss_sim.trucks import COMMAND_DONE, TRUCK_IDLE, Truck, validate
+from bss_sim.trucks import COMMAND_DONE, TRUCK_IDLE, TRUCK_RESTOCKING, TRUCK_RESUMED, Truck, validate
 from bss_sim.users import EXTERNAL_EMPTY, NO_DOCK, REASONS, REQUEST_FAILURES, SERVED, WalkingUsers
 
 USER_SLOT_STREAM = 0x5E5
@@ -590,17 +590,51 @@ class Simulator:
             if reason:
                 self._result(tr, CommandResult(tr.id, cmd, _requested(cmd), 0, self.now, self.now, reason))
                 continue
+            if self._needs_restock(tr, cmd):
+                if self.config.trucks.on_empty == "resume":
+                    self._insert_restock(tr, cmd)
+                    continue
+                self._result(tr, CommandResult(tr.id, cmd, _requested(cmd), 0, self.now, self.now, "stock_empty"))
+                self._cancel_queue(tr)
+                tr.current = None
+                self._notes.append(Notification(self.now, TRUCK_IDLE, {"truck": tr.id, "reason": "stock_empty"}))
+                return
             tr.current, tr.t_start = cmd, self.now
             tr.serial += 1
             if self._start(tr, cmd):
                 return
         tr.current = None
+        if tr.idle_reported:   # already reported with its reason (stock empty)
+            tr.idle_reported = False
+            return
         self._notes.append(Notification(self.now, TRUCK_IDLE, {"truck": tr.id, "reason": "queue_empty"}))
+
+    def _cancel_queue(self, tr: Truck) -> None:
+        while tr.queue:
+            cmd = tr.queue.popleft()
+            self._result(tr, CommandResult(tr.id, cmd, _requested(cmd), 0, self.now, self.now, "cancelled"))
+
+    def _needs_restock(self, tr: Truck, cmd: Command) -> bool:
+        """Stock empty and this command (or the swap right after this move) needs batteries."""
+        if tr.stock > 0:
+            return False
+        if isinstance(cmd, SwapBattery):
+            return cmd.n > 0 and bool(self._swappable(tr.stop, cmd.radius_m))
+        return isinstance(cmd, GoTo) and bool(tr.queue) and isinstance(tr.queue[0], SwapBattery) and tr.queue[0].n > 0
+
+    def _insert_restock(self, tr: Truck, cmd: Command) -> None:
+        """Spec §9.1 ``on_empty: resume``: depot first, then the interrupted command where it was
+        heading (a swap at the current stop goes back there first)."""
+        back = [cmd] if isinstance(cmd, GoTo) else [GoTo(tr.stop), cmd]
+        for c in reversed([ToDepot(), Restock(), *back]):
+            tr.queue.appendleft(c)
+        tr.auto_restock = True
+        self._notes.append(Notification(self.now, TRUCK_RESTOCKING, {"truck": tr.id, "reason": "stock_empty"}))
 
     def _check(self, tr: Truck, cmd: Command) -> str:
         """State-dependent validity, checked when the command starts."""
         wmax = self.scenario.walk_max_m
-        if isinstance(cmd, PickUp) and cmd.radius_m > wmax:
+        if isinstance(cmd, (PickUp, SwapBattery)) and cmd.radius_m > wmax:
             return f"invalid: radius_m above the bundle's walking neighbours ({wmax} m)"
         if isinstance(cmd, Drop) and cmd.at is not None:
             reach = self._within(tr.stop, self.config.trucks.max_spread_m)
@@ -655,6 +689,14 @@ class Simulator:
                 self._finish(tr, cmd.n, 0, tr.limit)
                 return False
             self._service(tr, k, tc.drop_per_bike_s)
+        elif isinstance(cmd, SwapBattery):
+            avail = len(self._swappable(tr.stop, cmd.radius_m))
+            k = min(cmd.n, avail, tr.stock)
+            tr.limit = "" if k == cmd.n else ("stock_empty" if tr.stock < min(cmd.n, avail) else "not_enough_ebikes")
+            if k == 0:
+                self._finish(tr, cmd.n, 0, tr.limit)
+                return False
+            self._service(tr, k, tc.swap_per_bike_s)
         elif isinstance(cmd, Restock):
             tr.service_s += tc.depot_restock_s
             self._busy_until(tr, self.now + tc.depot_restock_s)
@@ -672,8 +714,13 @@ class Simulator:
             self._do_pickup(tr, cmd)
         elif isinstance(cmd, Drop):
             self._do_drop(tr, cmd)
+        elif isinstance(cmd, SwapBattery):
+            self._do_swap(tr, cmd)
         elif isinstance(cmd, Restock):
             self._do_restock(tr, cmd)
+            if tr.auto_restock:
+                tr.auto_restock = False
+                self._notes.append(Notification(self.now, TRUCK_RESUMED, {"truck": tr.id}))
         self._next_command(tr)
 
     # --- services -------------------------------------------------------------------------
@@ -692,6 +739,32 @@ class Simulator:
             e = sorted((f._batt[b], i, b) for i, b in near if f.kind_l[b] == ELECTRIC)
             return [b for _, _, b in e] + [b for i, b in near if f.kind_l[b] != ELECTRIC]
         return [b for _, b in near]
+
+    def _swappable(self, stop: int, radius_m: float) -> list[int]:
+        """Parked e-bikes in reach that are not full, lowest charge first."""
+        f, full = self.fleet, self.battery.range_km
+        near = [(f._batt[b], i, b) for i, v in enumerate(self._within(stop, radius_m)) for b in f.bikes_at(v)
+                if f.kind_l[b] == ELECTRIC and f._batt[b] < full]
+        return [b for _, _, b in sorted(near)]
+
+    def _do_swap(self, tr: Truck, cmd: SwapBattery) -> None:
+        f, full = self.fleet, self.battery.range_km
+        todo = self._swappable(tr.stop, cmd.radius_m)[:min(tr.planned, tr.stock)]
+        for b in todo:
+            f.set_battery(b, full)
+        tr.stock -= len(todo)
+        tr.used += len(todo)
+        tr.swapped += len(todo)
+        reason = "taken_meanwhile" if len(todo) < tr.planned else tr.limit
+        self._finish(tr, cmd.n, len(todo), reason)
+        left = cmd.n - len(todo)
+        if tr.stock == 0 and left > 0 and self._swappable(tr.stop, cmd.radius_m):
+            if self.config.trucks.on_empty == "resume":   # come back for the rest after the depot
+                self._insert_restock(tr, SwapBattery(left, cmd.radius_m))
+            else:
+                self._cancel_queue(tr)
+                self._notes.append(Notification(self.now, TRUCK_IDLE, {"truck": tr.id, "reason": "stock_empty"}))
+                tr.idle_reported = True
 
     def _drop_targets(self, tr: Truck, cmd: Drop) -> list[int]:
         return list(cmd.at) if cmd.at else [tr.stop]
