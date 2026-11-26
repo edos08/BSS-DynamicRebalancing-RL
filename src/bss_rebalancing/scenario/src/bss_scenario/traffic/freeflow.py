@@ -31,6 +31,17 @@ DEFAULT_SPEED_MPH: dict[str, float] = {
 }
 FALLBACK_SPEED_MPH = 20.0
 
+#: Road classes for congestion factors (#57): OSM ``highway`` -> class index.
+ROAD_CLASSES = ("major", "secondary", "local")
+_CLASS_OF = {"motorway": 0, "motorway_link": 0, "trunk": 0, "trunk_link": 0, "primary": 0, "primary_link": 0,
+             "secondary": 1, "secondary_link": 1, "tertiary": 1, "tertiary_link": 1}
+
+
+def road_class(highway: str | None) -> int:
+    """0 major (motorway, trunk, primary), 1 secondary (secondary, tertiary), 2 local (anything else)."""
+    return _CLASS_OF.get(highway or "", 2)
+
+
 #: Road classes a van may not use.
 EXCLUDED_FOR_VANS = frozenset({"busway"})
 

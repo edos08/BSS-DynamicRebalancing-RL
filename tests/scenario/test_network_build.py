@@ -57,8 +57,8 @@ def test_cli_networks(tmp_path, capsys):
                      "--walk-radius-max", "300"]) == 0
     names = sorted(p.name for p in out.iterdir())
     assert names == ["bike_dist.npy", "bike_edges.parquet", "bike_nodes.parquet", "bike_to_drive.npz",
-                     "bike_walk_nbrs.npz", "drive_edges.parquet", "drive_nodes.parquet", "drive_time.npy",
-                     "network_report.json"]
+                     "bike_walk_nbrs.npz", "drive_dist.npy", "drive_edges.parquet", "drive_nodes.npz",
+                     "drive_nodes.parquet", "drive_time.npy", "drive_time_by_class.npy", "network_report.json"]
     bd = np.load(out / "bike_dist.npy")
     dt = np.load(out / "drive_time.npy")
     assert bd.shape == (36, 36) and dt.shape == (16, 16) and bd.dtype == dt.dtype == np.float32
@@ -67,6 +67,13 @@ def test_cli_networks(tmp_path, capsys):
     assert {"speed_kmh", "freeflow_s"} <= set(edges.columns) and "busway" not in edges["highway"].to_list()
     # one-way row: travel times are asymmetric somewhere
     assert np.abs(dt - dt.T).max() > 0
+    by_class = np.load(out / "drive_time_by_class.npy")
+    assert by_class.shape == (3, 16, 16)
+    np.testing.assert_allclose(by_class.sum(axis=0), dt, rtol=1e-5, atol=1e-3)
+    dd = np.load(out / "drive_dist.npy")
+    assert dd.shape == (16, 16) and np.all(np.diag(dd) == 0) and (dd >= dt * 20 / 3.6 * 0.999).all()  # 20 mph
+    with np.load(out / "drive_nodes.npz") as z:
+        assert z["lat"].shape == (16,) and z["road_classes"].tolist() == ["major", "secondary", "local"]
     b2d = np.load(out / "bike_to_drive.npz")
     assert b2d["node"].shape == (36,) and b2d["node"].max() < 16
     nb = Neighbours.load(out / "bike_walk_nbrs.npz")
