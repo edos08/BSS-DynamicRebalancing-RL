@@ -22,7 +22,8 @@ per slot so that it reaches ~0.1 after ``exploration_time`` of the training), wi
   oscillates during training, so the final weights are often not the best.
 
 **Weights & Biases** (issue #171, optional): ``--wandb`` logs the configuration, every episode and
-every validation, and uploads the best, final and latest models as versioned artifacts.
+every validation, and uploads **only the best model** of the run (one artifact, alias ``best``) at
+the end of training (issue #174).
 
 Results use the legacy layout, so ``bss-results-webapp`` shows them next to the legacy runs:
 ``<results>/run_NNN/training/episode_NNN/`` (scalars, per-3 h timeslot metrics, step data, zone
@@ -230,7 +231,7 @@ def main(argv=None) -> int:
     rm = ResultsManager(args.results_path, args.run_id, overwrite=args.overwrite or args.resume, interactive=False)
     ckpt_dir = rm.run_dir / "checkpoints"
     slots = {"n": 0}
-    start_episode, best = 0, -np.inf
+    start_episode, best, best_ep = 0, -np.inf, None
     if args.resume:
         path = latest_checkpoint(ckpt_dir)
         if path is None:
@@ -239,6 +240,7 @@ def main(argv=None) -> int:
         start_episode = state["episode"] + 1
         slots["n"] = state["extra"].get("slots", 0)
         best = state["extra"].get("best_val", -np.inf)
+        best_ep = state["extra"].get("best_episode")
         summary = rm.training_path / "train_summary.csv"
         if summary.exists():   # keep the episodes already saved in the run summary
             rm.training_summary = pd.read_csv(summary)
@@ -294,23 +296,27 @@ def main(argv=None) -> int:
                                                        "invalid", "truck_km")}, step=ep)
             if improved:
                 best = vs["city_service_level"]
+                best_ep = ep
                 agent.save_model(rm.models_path / "model_best.pt")
-                tracker.log_model(rm.models_path / "model_best.pt", ["best", f"episode-{ep}"],
-                                  {"episode": ep, "val_city_service_level": best, "val_date": val_date})
                 tracker.summary({"best/val_city_service_level": best, "best/episode": ep})
             print(f"val ep {ep:3d} ({val_date}): served {vs['city_service_level']:.4f} failures {vs['failed']} "
                   f"{'NEW BEST' if improved else f'best {best:.4f}'}", flush=True)
         if args.checkpoint_every and (ep + 1) % args.checkpoint_every == 0:
-            path = save_checkpoint(ckpt_dir, agent, {"slots": slots["n"], "best_val": best, "wandb_id": tracker.id},
-                                   episode=ep, buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
-            if args.val_every and (ep + 1) % args.val_every == 0:
-                tracker.log_model(path, ["latest", f"episode-{ep}"], {"episode": ep}, kind="checkpoint")
+            save_checkpoint(ckpt_dir, agent, {"slots": slots["n"], "best_val": best, "best_episode": best_ep,
+                                              "wandb_id": tracker.id},
+                            episode=ep, buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
     if stop_at < args.episodes:
         print(f"stopped after episode {stop_at - 1}; continue with --resume", flush=True)
         tracker.finish()
         return 0
     agent.save_model(rm.models_path / "model_final.pt")
-    tracker.log_model(rm.models_path / "model_final.pt", ["final"], {"episode": args.episodes - 1})
+    # W&B keeps one model per run: the best by validation, uploaded once (issue #174)
+    if (rm.models_path / "model_best.pt").exists():
+        tracker.log_model(rm.models_path / "model_best.pt", ["best"],
+                          {"episode": best_ep, "val_city_service_level": best, "val_date": val_date})
+    else:   # no validation ran: the final model is the best we have
+        tracker.log_model(rm.models_path / "model_final.pt", ["best"],
+                          {"episode": args.episodes - 1, "note": "no validation; final model"})
 
     # greedy evaluation on held-out weeks, as the webapp's validation view
     eval_env = make_env(args.bundle, args.eval_dates, args.days, sim_config, args.cell_m)

@@ -916,12 +916,10 @@ def main():
                             best_val_score = val_score
                             # Promote the already-saved episode snapshot — do NOT
                             # use the live agent weights (we are now one episode ahead).
-                            best_path = results_manager.promote_episode_to_best(
+                            results_manager.promote_episode_to_best(
                                 episode=pending_val.episode,
                                 score=val_score,
                             )
-                            tracker.log_model(best_path, ["best", f"episode-{pending_val.episode}"],
-                                              {"episode": pending_val.episode, "val_mean_daily_failures": val_score})
                             tracker.summary({"best/val_mean_daily_failures": val_score, "best/episode": pending_val.episode})
                             logger.info(
                                 f"[val] Episode {pending_val.episode}: NEW BEST promoted! "
@@ -1020,12 +1018,10 @@ def main():
                 if val_score is not None and val_score < best_val_score:
                     prev_best = best_val_score
                     best_val_score = val_score
-                    best_path = results_manager.promote_episode_to_best(
+                    results_manager.promote_episode_to_best(
                         episode=pending_val.episode,
                         score=val_score,
                     )
-                    tracker.log_model(best_path, ["best", f"episode-{pending_val.episode}"],
-                                      {"episode": pending_val.episode, "val_mean_daily_failures": val_score})
                     tracker.summary({"best/val_mean_daily_failures": val_score, "best/episode": pending_val.episode})
                     logger.info(
                         f"[val] Final best: episode {pending_val.episode}, "
@@ -1040,7 +1036,16 @@ def main():
         results_manager.save_run_summary()
         final_path = results_manager.models_path / "final_agent.pt"
         agent.save_model(final_path)
-        tracker.log_model(final_path, ["final"], {"episode": int(params["num_episodes"]) - 1})
+        # W&B keeps one model per run: the best by validation, uploaded once (issue #174)
+        best_path = results_manager.get_best_model_path()
+        if best_path is not None:
+            meta_path = best_path.parent / "metadata.json"
+            meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+            tracker.log_model(best_path, ["best"], {"episode": meta.get("episode"),
+                                                    "val_mean_daily_failures": meta.get("score")})
+        else:   # no validation finished: the final model is the best we have
+            tracker.log_model(final_path, ["best"], {"episode": int(params["num_episodes"]) - 1,
+                                                     "note": "no validation; final model"})
         tracker.finish()
         logger.info("Training completed successfully")
         tbar.close()

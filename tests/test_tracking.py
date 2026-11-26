@@ -54,6 +54,5 @@ def test_offline_run_logs_metrics_and_models(tmp_path, monkeypatch):
     assert all(any(r.glob("*.wandb")) for r in runs)                      # real offline data written
     steps = {step for step, m in logged if "train/return" in m}
     assert steps == {0, 1} and any("val/city_service_level" in m for _, m in logged)
-    assert ("checkpoint", ("latest", "episode-0")) in models and ("model", ("final",)) in models
-    assert any(kind == "model" and "best" in aliases for kind, aliases in models)
+    assert models == [("model", ("best",))]          # one model per run: the best, uploaded once at the end
     assert "eval/city_service_level" in summaries and "best/val_city_service_level" in summaries

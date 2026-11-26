@@ -1,11 +1,8 @@
 """Weights & Biases tracking of training runs (issue #171).
 
-:class:`Tracker` logs the run configuration, per-episode and validation metrics, and stores
-models as versioned W&B **artifacts**:
-
-* ``best``: the best model so far;
-* ``final``: the model at the end of training;
-* ``latest``: the latest checkpoint's model (networks and optimizer; the replay buffer stays local).
+:class:`Tracker` logs the run configuration, per-episode and validation metrics, and stores the
+run's model as a W&B **artifact**. The training loops upload only the best model (by validation),
+once at the end of training, alias ``best`` (issue #174); checkpoints stay local.
 
 It is a no-op unless enabled, so the training code calls it unconditionally. ``wandb`` is an
 optional dependency (``pip install "bss-rl-training[tracking]"``).
