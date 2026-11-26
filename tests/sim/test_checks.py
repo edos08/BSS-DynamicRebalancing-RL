@@ -5,7 +5,6 @@ import pytest
 
 from bss_sim.checks import compare, jsd_bits, ks, tvd
 from bss_sim.demand import PoissonDemand, ReplayDemand, TripRequests
-from test_demand import bundle, model  # noqa: F401  (module fixtures)
 
 
 def test_metric_properties():
@@ -27,7 +26,7 @@ def test_compare_identical_sets():
     assert m["daily_mean_ratio"] == 1 and m["hourly_tvd"] == 0 and m["od_jsd"] == 0 and m["ride_ks"] == 0
 
 
-def test_generator_close_to_recorded_fixture(bundle, model):  # noqa: F811
+def test_generator_close_to_recorded_fixture(bundle, model):
     days = [dt.date(2024, 9, d) for d in range(2, 28) if dt.date(2024, 9, d).weekday() < 4]
     rec = TripRequests.concat([ReplayDemand(model, bundle, 0).day(d) for d in days])
     gen = TripRequests.concat([PoissonDemand(model, seed=1).day(d) for d in days])

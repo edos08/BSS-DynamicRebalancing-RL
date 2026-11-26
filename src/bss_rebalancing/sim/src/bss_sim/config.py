@@ -92,7 +92,8 @@ class UserConfig:
 
 @dataclass(frozen=True)
 class ExternalConfig:
-    reservoir: int = 500                 # bikes outside the city at the start (spec §6.5)
+    reservoir: int = 1000                # bikes outside the city at the start (spec §6.5); see the spec
+                                         # for why it is not the ~4,100 bikes of the rest of the system
     ride_time_s: float = 900.0           # time from leaving the outside origin to arriving in the city
 
     def __post_init__(self):
