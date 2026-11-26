@@ -53,7 +53,7 @@ class Fleet:
         self.reservoir: tuple[list[int], list[int]] = ([], [])  # stacks per kind
         for b in range(n):
             self.reservoir[self.kind_l[b]].append(b)
-        self.listeners: list = []  # partitions: on_park(bike, node, sign)
+        self.listeners: list = []  # partitions: f(bike, node, +1 parked / -1 left)
 
     # --- per-node lists -------------------------------------------------------------------
     def park(self, bike: int, node: int) -> None:
@@ -95,6 +95,18 @@ class Fleet:
         self.status_count[self.status[bike]] -= 1
         self.status_count[status] += 1
         self.status[bike] = status
+
+    def set_battery(self, bike: int, km: float) -> None:
+        """Change a bike's charge; listeners see a parked bike leave and come back (band change)."""
+        if self.status[bike] == PARKED:
+            node = int(self.node[bike])
+            for f in self.listeners:
+                f(bike, node, -1)
+            self.battery_km[bike] = km
+            for f in self.listeners:
+                f(bike, node, 1)
+        else:
+            self.battery_km[bike] = km
 
     def bikes_at(self, node: int) -> list[int]:
         out, b = [], self.head[node]
