@@ -515,7 +515,10 @@ def train_dqn(
         next_state.steps = info['steps']
 
         # ── Replay push ─────────────────────────────────────────────────────────
-        agent.replay_buffer.push(state, action, reward, next_state, done)
+        # Semi-MDP transition (issue #164): the action just taken lasted info['steps'] steps of
+        # 30 s; the legacy env gives one reward per action, received when it is chosen. Episodes
+        # end on a time limit (truncation), so the next state is never terminal.
+        agent.replay_buffer.push(state, action, reward, next_state, done, steps=info['steps'], terminal=False)
 
         # ── Train step ──────────────────────────────────────────────────────────
         agent.train_step(batch_size)

@@ -35,17 +35,27 @@ class ReplayBuffer:
         self.buffer = []
         self.buffer_size = max_size
 
-    def push(self, state, action, reward, next_state, done):
+    def push(self, state, action, reward, next_state, done, steps=None, terminal=None):
         """
-        Adds a transition to the buffer.
+        Adds a transition to the buffer (semi-MDP: an action can last several steps, issue #164).
 
         Parameters:
             - state (PairData): Current state.
             - action (int): Action taken.
-            - reward (float): Reward received.
-            - next_state (PairData): Next state.
-            - done (bool): Whether the episode is complete.
+            - reward (float): Discounted reward collected **during this action**,
+              ``R = sum_{i < steps} gamma^i r_i`` (see ``DQNAgent.action_return``).
+            - next_state (PairData): State when the action ended.
+            - done (bool): Whether the episode is over (terminated or truncated), kept for logging.
+            - steps (int): Duration of **this** action in environment steps (``tau``); the target
+              discounts the next state by ``gamma ** steps``. Required.
+            - terminal (bool): Whether ``next_state`` is a true terminal state (no bootstrap).
+              Defaults to ``False``: an episode that ends on a time limit is truncated, and its
+              target still bootstraps.
         """
+        if steps is None:
+            raise ValueError("push() needs the duration of the action taken (steps); see issue #164")
+        if int(steps) < 1:
+            raise ValueError("an action lasts at least one step")
         # Create a PairData transition
         transition = PairData(
             x_s=state.x,
@@ -62,8 +72,9 @@ class ReplayBuffer:
         transition.actions = torch.tensor([action]).unsqueeze(dim=1)
         transition.reward = torch.tensor([reward], dtype=torch.float32).unsqueeze(dim=1)
         transition.agent_next_state = torch.tensor(next_state.agent_state, dtype=torch.float32).unsqueeze(dim=0)
-        transition.done = torch.tensor([done]).unsqueeze(dim=1)
-        transition.steps = torch.tensor([state.steps]).unsqueeze(dim=1)
+        transition.done = torch.tensor([bool(done)]).unsqueeze(dim=1)
+        transition.terminal = torch.tensor([bool(terminal) if terminal is not None else False]).unsqueeze(dim=1)
+        transition.steps = torch.tensor([int(steps)]).unsqueeze(dim=1)
 
         # Maintain buffer size by removing oldest transition if full
         if len(self.buffer) >= self.buffer_size:

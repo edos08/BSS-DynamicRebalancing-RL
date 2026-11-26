@@ -139,6 +139,24 @@ class DQNAgent:
         return total_loss, td_error
 
 
+    @staticmethod
+    def action_return(step_rewards, gamma: float) -> float:
+        """Discounted reward of an action that lasted ``len(step_rewards)`` steps:
+        ``R = sum_i gamma^i r_i`` (semi-MDP, issue #164)."""
+        r = 0.0
+        for i, x in enumerate(step_rewards):
+            r += (gamma ** i) * float(x)
+        return r
+
+    @staticmethod
+    def smdp_target(reward, steps, terminal, next_q, gamma: float):
+        """Semi-MDP Q-learning target ``y = R + gamma^tau * Q(s', a*) * (1 - terminal)``.
+
+        ``steps`` is the duration ``tau`` of the action taken in ``s`` (not of the one that led to
+        ``s``), ``terminal`` is true only for real terminal states: a time-limit truncation still
+        bootstraps (issue #164)."""
+        return reward + (gamma ** steps.float()) * next_q * (1.0 - terminal.float())
+
     def soft_update_target_network(self, tau=0.005):
         for target_param, train_param in zip(self.target_model.parameters(), self.train_model.parameters()):
             target_param.data.copy_(tau * train_param.data + (1 - tau) * target_param.data)
@@ -162,9 +180,9 @@ class DQNAgent:
             next_actions = self.train_model(batch, 't').argmax(dim=1, keepdim=True)
             next_q_values = self.target_model(batch, 't').gather(1, next_actions)
 
-            # Compute the Bellman equation to calculate the targhet Qt(S,a)
-            discount = self.gamma ** batch.steps
-            target_q_values = batch.reward + discount * next_q_values * (1 - batch.done.float())
+            # Semi-MDP Bellman target: discount by the duration of the action taken, bootstrap
+            # unless the next state is truly terminal (time-limit truncation still bootstraps)
+            target_q_values = self.smdp_target(batch.reward, batch.steps, batch.terminal, next_q_values, self.gamma)
 
         # Compute loss
         loss = F.smooth_l1_loss(train_q_values, target_q_values)
