@@ -134,6 +134,10 @@ optimizer, epsilon, the RNG states and the replay buffer; the last 2 are kept an
 - `--checkpoint-every N`, `--keep-checkpoints K`, and `--no-buffer-checkpoint` (smaller files; the
   replay buffer restarts empty) change what is saved.
 - `train_grid --stop-after N` stops after N episodes, to train in slices.
+- **Existing run id.** If `results/run_NNN` already exists, both trainers ask `Overwrite run N? [y/N]`.
+  Yes deletes the whole run (training, validation, models, checkpoints, local W&B files); anything
+  else stops and keeps it. `--overwrite` replaces it without asking; with no terminal (e.g. `nohup`)
+  the trainer stops instead of asking. `--resume` keeps the run (issue #178).
 
 **Best model.** `train_grid` validates the greedy policy every `--val-every 5` episodes on a held-out
 week (`--val-date`) and keeps the best as `models/model_best.pt`. DQN performance oscillates, so the
@@ -151,7 +155,7 @@ Add `--wandb` (and optionally `--wandb-project bss-rebalancing`, `--wandb-entity
 Only the **best model** of each run (by validation) is uploaded, once at the end of training, as one
 artifact with alias `best`, and its episode and score as metadata (issue #174). Checkpoints and the
 other models stay in `results/run_NNN/`. A resumed run (`--resume`) continues
-the same W&B run. Install the extra with `pip install -e "src/bss_rebalancing/rl_training[tracking]"`.
+the same W&B run. W&B runs silently: the trainer prints one line with the run link. Install the extra with `pip install -e "src/bss_rebalancing/rl_training[tracking]"`.
 
 **API key**: put `export WANDB_API_KEY=...` in `~/.config/bss-rl/secrets.sh` and `source` it
 before training, or run `wandb login` once. The code never prints or stores the key. In offline

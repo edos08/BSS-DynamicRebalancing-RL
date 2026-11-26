@@ -49,7 +49,7 @@ import pandas as pd
 from rl_training.agents import DQNAgent
 from rl_training.checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint
 from rl_training.memory import ReplayBuffer
-from rl_training.results import EpisodeResults, ResultsManager
+from rl_training.results import EpisodeResults, ResultsManager, prepare_run_dir
 from rl_training.tracking import Tracker
 from rl_training.utils import set_seed
 
@@ -189,7 +189,7 @@ def main(argv=None) -> int:
     ap.add_argument("--bundle", default="data/scenarios/cambridge-se-2024")
     ap.add_argument("--results-path", default="results/")
     ap.add_argument("--run-id", type=int, required=True)
-    ap.add_argument("--overwrite", action="store_true", help="replace an existing run with the same id")
+    ap.add_argument("--overwrite", action="store_true", help="replace an existing run with the same id without asking")
     ap.add_argument("--episodes", type=int, default=30)
     ap.add_argument("--days", type=float, default=7.0, help="episode length in days")
     ap.add_argument("--fleet", type=int, default=340, help="bikes in the zone (Cambridge ratio: 800 per 1,824 docks)")
@@ -228,7 +228,8 @@ def main(argv=None) -> int:
     agent = DQNAgent(num_actions=8, observation_space_len=env.agent_len, replay_buffer=ReplayBuffer(params["buffer"]),
                      gamma=params["gamma"], epsilon_start=params["epsilon_start"], epsilon_end=params["epsilon_end"],
                      epsilon_decay=T * T / math.log(10.0), lr=params["lr"], device=args.device, seed=args.seed)
-    rm = ResultsManager(args.results_path, args.run_id, overwrite=args.overwrite or args.resume, interactive=False)
+    prepare_run_dir(args.results_path, args.run_id, resume=args.resume, overwrite=args.overwrite)   # asks (#178)
+    rm = ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False)
     ckpt_dir = rm.run_dir / "checkpoints"
     slots = {"n": 0}
     start_episode, best, best_ep = 0, -np.inf, None
