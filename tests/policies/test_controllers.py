@@ -1,7 +1,7 @@
 import numpy as np
 import pytest
 
-from bss_policies import DoNothing, StaticTSP, run_episode
+from bss_policies import DoNothing, GreedyDeficit, StaticTSP, run_episode
 from bss_sim.config import SimConfig
 from bss_sim.simulator import Simulator
 from bss_sim.synthetic import make_bundle
@@ -76,6 +76,46 @@ def test_static_tsp_is_reproducible_and_helps_when_docked(bundle):
     static = np.mean([run(StaticTSP(), s)["city_service_level"] for s in (4, 5)])
     assert static > base
     assert run(DoNothing(), 4)["operating_cost_usd"] == 0.0      # an idle truck costs nothing
+
+
+def test_greedy_reacts_to_idle_trucks_without_double_claims(bundle):
+    sim = make(bundle, trucks=2)
+    rec = Recorder(GreedyDeficit(horizon_h=1))
+    res = run_episode(sim, rec, seed=3, start=START, duration_s=10 * 3600)
+    assert res.decisions > 10 and res.kpis["bikes_moved"] > 0
+    assert {tr for _, tr, *_ in rec.submitted} == {0, 1}
+    # at any instant, two trucks are never sent to serve the same zone
+    by_time = {}
+    for t, tr, cmds, _ in rec.submitted:
+        goto = [c.node for c in cmds if type(c).__name__ == "GoTo"]
+        if goto:
+            by_time.setdefault(t, []).append(goto[0])
+    assert all(len(v) == len(set(v)) for v in by_time.values())
+
+
+def test_greedy_is_reproducible_and_helps_when_docked(bundle):
+    def run(c, seed):
+        return run_episode(make(bundle, debug=False), c, seed=seed, start=START, duration_s=17 * 3600).kpis
+    assert run(GreedyDeficit(), 4) == run(GreedyDeficit(), 4)
+    base = np.mean([run(DoNothing(), s)["city_service_level"] for s in (4, 5)])
+    greedy = np.mean([run(GreedyDeficit(), s)["city_service_level"] for s in (4, 5)])
+    assert greedy > base
+
+
+def test_greedy_cools_down_zones_where_nothing_could_be_done(bundle):
+    from bss_sim.commands import CommandResult, PickUp
+    from bss_sim.engine import Notification
+
+    sim = make(bundle, debug=False)
+    g = GreedyDeficit(cooldown_s=1800)
+    sim.reset(seed=6, start=START)
+    g.reset(sim)
+    g.claims[0] = (3, 5)                                   # truck 0 was sent to take 5 bikes in zone 3
+    failed = CommandResult(0, PickUp(5), 5, 0, sim.now, sim.now, "not_enough_bikes")
+    g.act(sim, [Notification(sim.now, "command_done", {"truck": 0, "result": failed}),
+                Notification(sim.now, "truck_idle", {"truck": 0, "reason": "queue_empty"})])
+    assert g.cooldown == {3: sim.now + 1800}
+    assert g.claims.get(0, (None,))[0] != 3                 # it went somewhere else (or waits)
 
 
 def test_bad_zone_kind():
