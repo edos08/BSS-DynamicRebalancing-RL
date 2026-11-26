@@ -37,7 +37,7 @@ ALLOWED_SUFFIXES = {".parquet", ".npy", ".npz", ".json", ".yaml"}
 #: Files each component must contain (relative to the bundle).
 COMPONENT_FILES: dict[str, tuple[str, ...]] = {
     "trips": ("trips/cleaning_report.json",),
-    "network": ("network/bike_nodes.parquet", "network/bike_edges.parquet", "network/bike_dist.npy",
+    "network": ("network/bike_nodes.parquet", "network/bike_nodes.npz", "network/bike_edges.parquet", "network/bike_dist.npy",
                 "network/bike_walk_nbrs.npz", "network/drive_nodes.parquet", "network/drive_edges.parquet",
                 "network/drive_time.npy", "network/drive_dist.npy", "network/drive_time_by_class.npy",
                 "network/drive_nodes.npz", "network/bike_to_drive.npz", "network/network_report.json"),

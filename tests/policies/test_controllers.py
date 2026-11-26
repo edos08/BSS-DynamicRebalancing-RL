@@ -1,0 +1,145 @@
+import numpy as np
+import pytest
+
+from bss_policies import DoNothing, GreedyDeficit, StaticTSP, run_episode
+from bss_sim.config import SimConfig
+from bss_sim.simulator import Simulator
+from bss_sim.synthetic import make_bundle
+
+START = "2024-09-17T05:00"
+
+
+@pytest.fixture(scope="module")
+def bundle(tmp_path_factory):
+    return make_bundle(tmp_path_factory.mktemp("c"), n_side=24, n_stations=12, weekday_trips=2500, seed=3)
+
+
+def make(bundle, mode="docked", trucks=1, debug=True):
+    cfg = {"mode": mode, "debug": debug, "fleet": {"size": 100, "initial_distribution": "uniform"},
+           "trucks": {"count": trucks}, "telemetry": {"event_log": False}}
+    return Simulator.from_scenario(bundle, SimConfig.from_dict(cfg))
+
+
+class Recorder:
+    """Wraps a controller and records what it submits."""
+
+    def __init__(self, inner):
+        self.inner, self.name = inner, inner.name
+        self.submitted = []
+
+    def describe(self):
+        return self.inner.describe()
+
+    def reset(self, sim):
+        orig = sim.submit
+
+        def submit(truck, cmds, replace=False):
+            self.submitted.append((sim.now, truck, list(cmds), replace))
+            return orig(truck, cmds, replace)
+        sim.submit = submit
+        self.inner.reset(sim)
+
+    def act(self, sim, notes):
+        self.inner.act(sim, notes)
+
+
+def test_static_tsp_plans_on_schedule_and_moves_bikes(bundle):
+    sim = make(bundle)
+    rec = Recorder(StaticTSP(every_h=3, first_h=6))
+    res = run_episode(sim, rec, seed=1, start=START, duration_s=12 * 3600)    # invariants after every event
+    times = sorted({t for t, *_ in rec.submitted})
+    assert times[:3] == [6 * 3600, 9 * 3600, 12 * 3600]
+    assert all(r for *_, r in rec.submitted)                                  # each schedule replaces the last
+    assert res.kpis["bikes_moved"] > 0 and res.kpis["truck_km"] > 0
+    assert res.controller["every_h"] == 3 and res.controller["zones"] == "stations"
+
+
+def test_static_tsp_respects_capacity_and_swaps(bundle):
+    sim = make(bundle, mode="dockless")
+    rec = Recorder(StaticTSP(every_h=2, swap_below=0.5))
+    res = run_episode(sim, rec, seed=2, start=START, duration_s=8 * 3600)
+    cap = sim.config.trucks.capacity
+    for _, _, cmds, _ in rec.submitted:
+        picks = [c.n for c in cmds if type(c).__name__ == "PickUp"]
+        assert all(0 < n <= cap for n in picks)
+    kinds = {type(c).__name__ for _, _, cmds, _ in rec.submitted for c in cmds}
+    assert {"GoTo", "PickUp", "Drop"} <= kinds
+    assert res.kpis["batteries_swapped"] >= 0
+
+
+def test_static_tsp_is_reproducible_and_helps_when_docked(bundle):
+    def run(c, seed):
+        return run_episode(make(bundle, debug=False), c, seed=seed, start=START, duration_s=17 * 3600).kpis
+    a, b = run(StaticTSP(), 4), run(StaticTSP(), 4)
+    assert a == b
+    base = np.mean([run(DoNothing(), s)["city_service_level"] for s in (4, 5)])
+    static = np.mean([run(StaticTSP(), s)["city_service_level"] for s in (4, 5)])
+    assert static > base
+    assert run(DoNothing(), 4)["operating_cost_usd"] == 0.0      # an idle truck costs nothing
+
+
+def test_greedy_reacts_to_idle_trucks_without_double_claims(bundle):
+    sim = make(bundle, trucks=2)
+    rec = Recorder(GreedyDeficit(horizon_h=1))
+    res = run_episode(sim, rec, seed=3, start=START, duration_s=10 * 3600)
+    assert res.decisions > 10 and res.kpis["bikes_moved"] > 0
+    assert {tr for _, tr, *_ in rec.submitted} == {0, 1}
+    # at any instant, two trucks are never sent to serve the same zone
+    by_time = {}
+    for t, tr, cmds, _ in rec.submitted:
+        goto = [c.node for c in cmds if type(c).__name__ == "GoTo"]
+        if goto:
+            by_time.setdefault(t, []).append(goto[0])
+    assert all(len(v) == len(set(v)) for v in by_time.values())
+
+
+def test_greedy_is_reproducible_and_helps_when_docked(bundle):
+    def run(c, seed):
+        return run_episode(make(bundle, debug=False), c, seed=seed, start=START, duration_s=17 * 3600).kpis
+    assert run(GreedyDeficit(), 4) == run(GreedyDeficit(), 4)
+    base = np.mean([run(DoNothing(), s)["city_service_level"] for s in (4, 5)])
+    greedy = np.mean([run(GreedyDeficit(), s)["city_service_level"] for s in (4, 5)])
+    assert greedy > base
+
+
+def test_greedy_cools_down_zones_where_nothing_could_be_done(bundle):
+    from bss_sim.commands import CommandResult, PickUp
+    from bss_sim.engine import Notification
+
+    sim = make(bundle, debug=False)
+    g = GreedyDeficit(cooldown_s=1800)
+    sim.reset(seed=6, start="2024-09-17T08:00")            # within the shift
+    g.reset(sim)
+    g.claims[0] = (3, 5)                                   # truck 0 was sent to take 5 bikes in zone 3
+    failed = CommandResult(0, PickUp(5), 5, 0, sim.now, sim.now, "not_enough_bikes")
+    g.act(sim, [Notification(sim.now, "command_done", {"truck": 0, "result": failed}),
+                Notification(sim.now, "truck_idle", {"truck": 0, "reason": "queue_empty"})])
+    assert g.cooldown == {3: sim.now + 1800}
+    assert g.claims.get(0, (None,))[0] != 3                 # it went somewhere else (or waits)
+
+
+def test_bad_zone_kind():
+    with pytest.raises(ValueError):
+        StaticTSP(zones="hexagons")
+    with pytest.raises(ValueError):
+        StaticTSP(every_h=0)
+
+
+@pytest.mark.parametrize("make_controller", [lambda: StaticTSP(every_h=2), lambda: GreedyDeficit()])
+def test_shifts_send_vans_to_the_depot_overnight(bundle, make_controller):
+    sim = make(bundle, debug=False)
+    rec = Recorder(make_controller())
+    res = run_episode(sim, rec, seed=7, start="2024-09-17T00:00", duration_s=2 * 86400)
+    for t, _, cmds, _ in rec.submitted:
+        sec = t % 86400
+        names = [type(c).__name__ for c in cmds]
+        if names == ["ToDepot", "Restock"]:
+            assert sec == 22 * 3600
+        else:
+            assert 6 * 3600 <= sec < 22 * 3600, (t, names)    # nothing else outside the shift
+    assert res.kpis["energy_flags"] == 0
+    tk = sim.truck_kpis(0)
+    assert tk["kwh_since_depot"] < 0.1 and sim.trucks[0].stop == sim.depot_stop   # only the restock at the depot
+    assert res.controller["shift"] == (6.0, 22.0)
+    with pytest.raises(ValueError):
+        StaticTSP(shift=(22, 6))

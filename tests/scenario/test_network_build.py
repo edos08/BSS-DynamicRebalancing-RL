@@ -56,7 +56,7 @@ def test_cli_networks(tmp_path, capsys):
     assert cli.main(["networks", "--bike", str(bike), "--drive", str(drive), "--out", str(out),
                      "--walk-radius-max", "300"]) == 0
     names = sorted(p.name for p in out.iterdir())
-    assert names == ["bike_dist.npy", "bike_edges.parquet", "bike_nodes.parquet", "bike_to_drive.npz",
+    assert names == ["bike_dist.npy", "bike_edges.parquet", "bike_nodes.npz", "bike_nodes.parquet", "bike_to_drive.npz",
                      "bike_walk_nbrs.npz", "drive_dist.npy", "drive_edges.parquet", "drive_nodes.npz",
                      "drive_nodes.parquet", "drive_time.npy", "drive_time_by_class.npy", "network_report.json"]
     bd = np.load(out / "bike_dist.npy")
@@ -74,6 +74,8 @@ def test_cli_networks(tmp_path, capsys):
     assert dd.shape == (16, 16) and np.all(np.diag(dd) == 0) and (dd >= dt * 20 / 3.6 * 0.999).all()  # 20 mph
     with np.load(out / "drive_nodes.npz") as z:
         assert z["lat"].shape == (16,) and z["road_classes"].tolist() == ["major", "secondary", "local"]
+    with np.load(out / "bike_nodes.npz") as z:
+        assert z["x"].shape == (36,) and np.allclose(z["x"], pl.read_parquet(out / "bike_nodes.parquet")["x"].to_numpy())
     b2d = np.load(out / "bike_to_drive.npz")
     assert b2d["node"].shape == (36,) and b2d["node"].max() < 16
     nb = Neighbours.load(out / "bike_walk_nbrs.npz")

@@ -58,6 +58,8 @@ def make_bundle(path: str | Path, n_side: int = 70, block_m: float = 60.0, n_sta
              indices=np.concatenate(idx).astype(np.int32), dist=np.concatenate(dd).astype(np.float32),
              max_radius_m=np.float64(walk_max_m))
 
+    np.savez(root / "network" / "bike_nodes.npz", osm_id=np.arange(n), lat=42.36 + y / 111_000.0,
+             lon=-71.1 + x / 82_000.0, x=x.astype(float), y=y.astype(float))
     _drive_network(root, n_side, block_m, x, y)
 
     S = n_stations

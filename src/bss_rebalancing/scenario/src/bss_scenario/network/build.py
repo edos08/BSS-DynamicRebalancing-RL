@@ -4,6 +4,7 @@ Outputs (``out_dir``):
 
 =========================  ====================================================================
 ``bike_nodes.parquet``     node_idx, osm_id, lat, lon, x, y (metres, shared projection)
+``bike_nodes.npz``         the same as arrays, for the simulator (no Parquet)
 ``bike_edges.parquet``     u, v, length_m, highway, maxspeed, oneway, name
 ``bike_dist.npy``          float32 [N, N] directed shortest paths on the bike network (m)
 ``bike_walk_nbrs.npz``     CSR walking neighbours (undirected) up to ``walk_radius_max_m``
@@ -79,6 +80,9 @@ def build_networks(bike_graphml: str | Path, drive_graphml: str | Path, out_dir:
     b2d_node, b2d_dist = nearest_nodes(bike, drive)
 
     bike.nodes.write_parquet(out / "bike_nodes.parquet")
+    bn = bike.nodes
+    np.savez(out / "bike_nodes.npz", osm_id=bn["osm_id"].to_numpy(), lat=bn["lat"].to_numpy(),
+             lon=bn["lon"].to_numpy(), x=bn["x"].to_numpy(), y=bn["y"].to_numpy())
     bike.edges.write_parquet(out / "bike_edges.parquet")
     np.save(out / "bike_dist.npy", bike_dist)
     nbrs.save(out / "bike_walk_nbrs.npz")

@@ -48,7 +48,8 @@ def test_truck_kpis_add_up(syn):
                 + van.drive_kwh(km * 500, t["drive_s"] / 2, 4) + van.drive_kwh(km * 500, t["drive_s"] / 2, 5))
     assert t["kwh"] == pytest.approx(expected, rel=1e-6)
     assert t["kwh_since_depot"] == 0.0               # back at the depot
-    hours = elapsed / 3600
+    hours = (elapsed - 1800) / 3600                     # working time: the last 30 min idle are not paid
+    assert t["paid_hours"] == pytest.approx(hours)
     assert t["cost_usd"]["driver"] == pytest.approx(hours * 22.68)
     assert t["kgco2e"] == pytest.approx(t["kwh"] / 0.9 * 0.254)
     assert k["truck_km"] == t["km"] and k["bikes_moved"] == 2 and k["batteries_swapped"] == 2
