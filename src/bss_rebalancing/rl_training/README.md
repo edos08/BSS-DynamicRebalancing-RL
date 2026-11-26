@@ -140,6 +140,22 @@ week (`--val-date`) and keeps the best as `models/model_best.pt`. DQN performanc
 last weights are often not the best. `bss-train` does the same with its validation subprocesses
 (`models/best/`), unless `--one-validation` is given.
 
+### Weights & Biases
+
+Add `--wandb` (and optionally `--wandb-project bss-rebalancing`, `--wandb-entity <team>`,
+`--wandb-mode offline`) to `bss-train` or `train_grid` (issue #171). It logs:
+- the configuration, including the reward;
+- every episode (return, failures, service level, invalid actions, epsilon, loss, buffer size);
+- every validation.
+
+Models are stored as versioned artifacts: `best` whenever the validation improves, `final` at the
+end, and `latest` (a `train_grid` checkpoint at each validation). A resumed run (`--resume`) continues
+the same W&B run. Install the extra with `pip install -e "src/bss_rebalancing/rl_training[tracking]"`.
+
+**API key**: put `export WANDB_API_KEY=...` in `~/.config/bss-rl/secrets.sh` and `source` it
+before training, or run `wandb login` once. The code never prints or stores the key. In offline
+mode nothing is uploaded; `wandb sync results/run_NNN/wandb/offline-run-*` uploads later.
+
 ## Training Parameters
 
 ### CLI Arguments

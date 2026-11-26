@@ -49,6 +49,9 @@ dependencies = [
 telegram = [
     "tqdm[telegram]>=4.65.0"
 ]
+tracking = [
+    "wandb>=0.19",          # Weights & Biases tracking and model artifacts (--wandb)
+]
 dev = [
     "pytest>=7.4.0",
     "pytest-cov>=4.1.0",

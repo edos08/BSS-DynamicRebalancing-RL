@@ -47,15 +47,27 @@ def test_train_checkpoint_and_resume(data_path, tmp_path):
         assert r.returncode == 0, r.stdout[-2000:] + r.stderr[-2000:]
         return r.stdout
 
-    run(["--num-episodes", "1"])
+    wandb = ["--wandb", "--wandb-mode", "offline"] if _has_wandb() else []
+    run(["--num-episodes", "1"] + wandb)
     ckpts = Path(tmp_path) / "run_005" / "checkpoints"
     assert (ckpts / "last.pt").exists() and (ckpts / "ckpt_episode_000.buffer.pt").exists()
-    out = run(["--num-episodes", "2", "--resume"])
+    out = run(["--num-episodes", "2", "--resume"] + wandb)
     assert "Resumed from ckpt_episode_000.pt: next episode 1" in out
     train = Path(tmp_path) / "run_005" / "training"
     assert (train / "episode_000" / "scalars.json").exists() and (train / "episode_001" / "scalars.json").exists()
     import pandas as pd
     assert pd.read_csv(train / "train_summary.csv")["episode"].tolist() == [0, 1]
+    if wandb:   # one W&B run, continued by the resume
+        runs = sorted((Path(tmp_path) / "run_005" / "wandb").glob("offline-run-*"))
+        assert len(runs) == 2 and len({r.name.rsplit("-", 1)[1] for r in runs}) == 1
+
+
+def _has_wandb():
+    try:
+        import wandb  # noqa: F401
+        return True
+    except ImportError:
+        return False
 
 
 def test_benchmark_cli(data_path, tmp_path):
