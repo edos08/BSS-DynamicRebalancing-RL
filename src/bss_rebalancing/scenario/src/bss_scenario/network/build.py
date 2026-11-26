@@ -10,6 +10,10 @@ Outputs (``out_dir``):
 ``drive_nodes.parquet``    as bike nodes, drive network without busways
 ``drive_edges.parquet``    as bike edges + speed_kmh, speed_source, freeflow_s
 ``drive_time.npy``         float32 [M, M] free-flow driving time (s), one-way respected
+``drive_dist.npy``         float32 [M, M] length (m) of those fastest paths
+``drive_time_by_class.npy`` float32 [C, M, M] free-flow time of those paths on each road class
+                           (``ROAD_CLASSES``: major, secondary, local); sums to ``drive_time``
+``drive_nodes.npz``        node_idx order: osm_id, lat, lon, x, y (for the simulator, no Parquet)
 ``bike_to_drive.npz``      node: int32 [N] nearest drive node of each bike node; dist_m: float32 [N]
 ``network_report.json``    sizes, dropped nodes, speed coverage, projection, build times
 =========================  ====================================================================
@@ -26,8 +30,8 @@ import numpy as np
 from scipy.spatial import cKDTree
 
 from bss_scenario.network.graph import Network, load_graphml
-from bss_scenario.network.paths import all_pairs, neighbour_stats, walk_neighbours
-from bss_scenario.traffic.freeflow import EXCLUDED_FOR_VANS, edge_speeds, speed_report
+from bss_scenario.network.paths import all_pairs, neighbour_stats, path_sums, walk_neighbours
+from bss_scenario.traffic.freeflow import EXCLUDED_FOR_VANS, ROAD_CLASSES, edge_speeds, road_class, speed_report
 
 
 def nearest_nodes(src: Network, dst: Network) -> tuple[np.ndarray, np.ndarray]:
@@ -63,7 +67,13 @@ def build_networks(bike_graphml: str | Path, drive_graphml: str | Path, out_dir:
     timings["walk_nbrs_s"] = time.perf_counter() - t
 
     t = time.perf_counter()
-    drive_time = all_pairs(drive, drive_edges["freeflow_s"].to_numpy())
+    ff = drive_edges["freeflow_s"].to_numpy()
+    cls = np.array([road_class(h) for h in drive_edges["highway"].to_list()])
+    extras = {"length": drive_edges["length_m"].to_numpy()}
+    extras |= {c: np.where(cls == i, ff, 0.0) for i, c in enumerate(ROAD_CLASSES)}
+    drive_time, sums = path_sums(drive, ff, extras)
+    drive_dist = sums["length"]
+    by_class = np.stack([sums[c] for c in ROAD_CLASSES])
     timings["drive_time_s"] = time.perf_counter() - t
 
     b2d_node, b2d_dist = nearest_nodes(bike, drive)
@@ -75,6 +85,12 @@ def build_networks(bike_graphml: str | Path, drive_graphml: str | Path, out_dir:
     drive.nodes.write_parquet(out / "drive_nodes.parquet")
     drive_edges.write_parquet(out / "drive_edges.parquet")
     np.save(out / "drive_time.npy", drive_time)
+    np.save(out / "drive_dist.npy", drive_dist)
+    np.save(out / "drive_time_by_class.npy", by_class)
+    dn = drive.nodes
+    np.savez(out / "drive_nodes.npz", osm_id=dn["osm_id"].to_numpy(), lat=dn["lat"].to_numpy(),
+             lon=dn["lon"].to_numpy(), x=dn["x"].to_numpy(), y=dn["y"].to_numpy(),
+             road_classes=np.array(ROAD_CLASSES))
     np.savez(out / "bike_to_drive.npz", node=b2d_node, dist_m=b2d_dist)
 
     report = {
@@ -86,7 +102,10 @@ def build_networks(bike_graphml: str | Path, drive_graphml: str | Path, out_dir:
         "drive": {"nodes": drive.n, "edges": drive.edges.height, "dropped_nodes": drive.dropped_nodes,
                   "excluded_highways": sorted(EXCLUDED_FOR_VANS),
                   "speeds": {k: v for k, v in speed_report(drive_edges).items() if k != "default_by_class"},
-                  "time_s": {"median": float(np.median(drive_time)), "max": float(drive_time.max())}},
+                  "time_s": {"median": float(np.median(drive_time)), "max": float(drive_time.max())},
+                  "dist_m": {"median": float(np.median(drive_dist)), "max": float(drive_dist.max())},
+                  "time_share_by_class": {c: float(by_class[i].sum() / max(drive_time.sum(), 1e-9))
+                                          for i, c in enumerate(ROAD_CLASSES)}},
         "bike_to_drive_m": {"median": float(np.median(b2d_dist)), "p99": float(np.percentile(b2d_dist, 99)),
                             "max": float(b2d_dist.max())},
         "timings_s": {k: round(v, 2) for k, v in timings.items()},

@@ -105,6 +105,9 @@ data/scenarios/cambridge-2024/
 │   ├── drive_nodes.parquet    # drive network without busways
 │   ├── drive_edges.parquet    # + speed_kmh, speed_source, freeflow_s
 │   ├── drive_time.npy         # float32 [M, M] free-flow driving time (s), one-way streets respected
+│   ├── drive_dist.npy         # float32 [M, M] length (m) of those fastest paths
+│   ├── drive_time_by_class.npy # float32 [3, M, M] their free-flow time on major / secondary / local roads
+│   ├── drive_nodes.npz        # drive node coordinates for the simulator (osm_id, lat, lon, x, y)
 │   ├── bike_to_drive.npz      # node: nearest drive node of each bike node; dist_m
 │   └── network_report.json
 ├── stations/
@@ -400,6 +403,22 @@ each forecast provider ships with tests (#29) run on simulated and on held-out 2
 - **Sharpness** reported next to `destination` (oracle) and `none`, so the cost of not knowing
   destinations is measured, not assumed.
 
+**Implementation (#127–#130, `bss_sim.info`, `bss_sim.forecast`).**
+- **Interface**: `sim.observe()` gives the observation; `sim.forecast(window_s, partition, provider)`
+  gives departures and arrivals per group, with `provider` = `mean` (analytic), `sampled` (K scenarios
+  from the `forecast` stream) or `oracle` (needs `allow_oracle`).
+- **Ride times** between places are tabulated per bike type:
+  - for generated demand, from the generator's own mixture over node pairs;
+  - for replayed demand, from the model fitted to recorded durations.
+- **Served shares**: only served requests become arrivals, so the forecast uses the observed served
+  shares (city and outside separately).
+- **Demand level**: the forecast estimates the current level from the requests of the last 6 h against
+  the model, with a Gamma prior of 50 requests. The model's day noise and trends within a month are
+  not otherwise known; the sampled forecast draws the level from its posterior.
+- **Calibration check**: `bss_sim.forecast_check` runs in CI on a synthetic bundle;
+  `scripts/validate_forecast.py` reports on real bundles:
+  [`reports/forecast-calibration.md`](reports/forecast-calibration.md).
+
 ---
 
 ## 9. Operators (trucks)
@@ -454,32 +473,39 @@ Commands (queued per truck, executed in order):
 Hours with similar factors are grouped into a few traffic regimes so that time matrices stay small
 (one ~16 MB matrix per regime).
 
-**Energy** (`VehicleEnergyModel`, issue #28): trucks are **electric vans**. Consumption is a
-function of speed (constant-speed consumption curve, as used by TomTom's EV routing), stops and
-load. The default preset `e_transit` follows a Ford E-Transit cargo van (≈ 68 kWh usable battery,
-≈ 0.3–0.4 kWh/km in urban driving); the exact curve and figures are fixed and sourced in #28.
+**Energy** (`bss_sim.vehicle`, #122): trucks are **electric vans**. Consumption of a drive uses its
+distance, its average speed, the stops on the way and the load: rolling resistance, aerodynamic drag,
+kinetic energy lost at stops net of regenerative braking, all through the drivetrain efficiency, plus
+auxiliaries for the driving time. During services the van stands with lower auxiliary power. The
+default preset `e_transit` follows a Ford E-Transit cargo van: 68 kWh usable (2022–23; 89 kWh for
+the 2024+ extended-range pack). Ford's range figures give about 0.34 kWh/km on a mixed cycle. With
+typical cargo-van parameters (2,900 kg, Crr 0.012, CdA 2.0 m², drivetrain 0.85, regeneration 60 %,
+auxiliaries 2 kW), the model gives 0.31 kWh/km at 60 km/h with 1 stop/km and **0.24 kWh/km at
+25 km/h with 3 stops/km** (Cambridge streets). All parameters are in the `vehicle` section of the
+configuration.
 
 The van battery is **not a constraint**: vans are assumed always charged, because a van running
 low is swapped for a charged one at its next depot visit. This is negligible in practice: a shift
-in Cambridge (≈ 18 km²) drives on the order of 60–120 km, i.e. roughly 20–50 kWh, below the usable
+in Cambridge (≈ 18 km²) drives on the order of 60–120 km, i.e. roughly 15–30 kWh, below the usable
 capacity. Energy is a **KPI**: kWh per truck and per shift (and derived cost/emissions) are
 reported, and a run is flagged if a truck's kWh between two depot visits exceeds the usable
 capacity, so the assumption is checked rather than trusted.
 
-**Cost and emissions** (KPIs only, for later analyses; they never change the dynamics):
+**Cost and emissions** (KPIs only, for later analyses; they never change the dynamics). They are in
+USD for Cambridge, MA, in the `costs` section, with these sourced defaults:
 
 ```yaml
 costs:
-  electricity_eur_per_kwh: ...      # energy cost of the vans
-  driver_eur_per_hour: ...          # labour, per truck-hour on shift
-  van_eur_per_km: ...               # maintenance / depreciation
-  battery_swap_eur: ...             # handling cost per swapped battery
-emissions:
-  grid_kgco2e_per_kwh: ...          # electricity carbon intensity (ISO New England average)
+  electricity_usd_per_kwh: 0.22     # EIA, Massachusetts commercial price, Oct 2025 (21.98 ¢/kWh)
+  charging_efficiency: 0.90         # grid -> battery (assumption)
+  driver_usd_per_hour: 22.68        # BLS OEWS May 2021, light truck drivers, Boston metro (wages only)
+  van_usd_per_km: 0.10              # maintenance and tyres (assumption)
+  battery_swap_usd: 0.0             # handling already paid as driver time
+  grid_kgco2e_per_kwh: 0.254        # ISO-NE 2024 average incl. net imports (560 lb CO2/MWh)
 ```
 
 Reported per truck, per shift and per run: kWh, km driven, operating cost, kg CO2e, and per
-rebalanced bike / per extra served trip. Default values are chosen and sourced in #28.
+rebalanced bike / per extra served trip.
 
 ### 9.1 Depot returns and resuming
 
@@ -499,6 +525,17 @@ When the stock is empty and the current or next command needs it:
 
 Resuming the interrupted command, rather than returning to the point where the stock ran out,
 keeps the controller's plan valid and avoids a wasted trip back.
+
+Implementation (#125): the check runs when a command is about to start.
+- A `SwapBattery` with an empty stock, while e-bikes in reach still need a swap, inserts
+  `ToDepot, Restock, GoTo(<this stop>)` before it.
+- A `GoTo` followed by such a swap inserts `ToDepot, Restock` before the `GoTo`, so the truck heads
+  where it was going after restocking.
+- A swap that empties the stock part-way reports `stock_empty` with what it did. If e-bikes there
+  still need a swap, it re-queues the rest the same way.
+- Notifications: `truck_restocking`, then `truck_resumed` after the restock.
+- With `on_empty: idle`, the remaining queue is cancelled and the truck reports
+  `truck_idle(reason="stock_empty")`.
 
 Execution is honest about time: driving, stopping and handling all take time, and the state
 changes when they complete (fixes the old asymmetry where pick-ups happened at decision time).

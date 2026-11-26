@@ -185,7 +185,9 @@ def build_demand(bundle_root: str | Path, config: DemandConfig = DemandConfig())
 
     bike_dist = np.load(root / "network" / "bike_dist.npy", mmap_mode="r")
     place_dist = np.asarray(bike_dist[np.ix_(place_node, place_node)])  # [P-1, P-1] station-node distances
-    ride = fit_ride_time(fit_trips, np.arange(len(place_node)), place_dist, places.external)
+    cleaning = json.loads((root / "trips" / "cleaning_report.json").read_text())["config"]
+    ride = fit_ride_time(fit_trips, np.arange(len(place_node)), place_dist, places.external,
+                         max_duration_s=float(cleaning["max_duration_s"]))
     ride.save(out / "ride_time.npz")
 
     replay_index = export_replay(assign_places(trips, stations, Projection(**scenario["projection"])), out / "replay")

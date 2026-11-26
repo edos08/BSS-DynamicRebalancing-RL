@@ -9,7 +9,9 @@ CI has no real data (bundles are built from git-ignored downloads), so the perfo
 * ``n_stations`` stations (default 91) on random nodes, ~19 docks each, plus ``EXTERNAL``;
 * demand: four day groups, a two-peak hourly profile, gravity-like OD with ~54 % of trips
   having one end outside, ~9,500 requests on a weekday; kernel spreading over nodes within 400 m;
-* ride times: speed quantiles by distance band (classic ~12 km/h, e-bike ~16 km/h).
+* ride times: speed quantiles by distance band (classic ~12 km/h, e-bike ~16 km/h);
+* drive network: every second street of the bike grid (35 x 35 = 1,225 nodes), Manhattan paths,
+  every fifth street a major road (40 km/h), the others local (30 km/h); time split by road class.
 
 Only the files the simulator reads are written (npz/json/npy), with ``schema_version`` 1.
 """
@@ -55,6 +57,8 @@ def make_bundle(path: str | Path, n_side: int = 70, block_m: float = 60.0, n_sta
     np.savez(root / "network" / "bike_walk_nbrs.npz", indptr=np.array(indptr, np.int64),
              indices=np.concatenate(idx).astype(np.int32), dist=np.concatenate(dd).astype(np.float32),
              max_radius_m=np.float64(walk_max_m))
+
+    _drive_network(root, n_side, block_m, x, y)
 
     S = n_stations
     st_node = np.sort(rng.choice(n, size=S, replace=False)).astype(np.int32)
@@ -113,6 +117,38 @@ def make_bundle(path: str | Path, n_side: int = 70, block_m: float = 60.0, n_sta
     (root / "manifest.json").write_text(json.dumps({"bundle_id": f"synthetic-{n_side}x{n_side}", "schema_version": 1,
                                                     "synthetic": True, "seed": seed}, indent=2))
     return root
+
+
+def _drive_network(root: Path, n_side: int, block_m: float, x: np.ndarray, y: np.ndarray) -> None:
+    """Coarser drive grid; a path goes along its row first, then along its column (Manhattan).
+
+    Streets with index divisible by 5 are major (40 km/h), the others local (30 km/h). Time on each
+    class is the horizontal leg on the start row plus the vertical leg on the end column.
+    """
+    k = (n_side + 1) // 2
+    m = k * k
+    rows, cols = np.divmod(np.arange(m), k)          # drive node (row, col) on the coarse grid
+    step = 2 * block_m
+    speed = np.where(np.arange(k) % 5 == 0, 40 / 3.6, 30 / 3.6)
+    major = np.arange(k) % 5 == 0
+    dx = np.abs(cols[:, None] - cols[None, :]) * step   # along the start node's row
+    dy = np.abs(rows[:, None] - rows[None, :]) * step   # along the end node's column
+    t_h = dx / speed[rows][:, None]
+    t_v = dy / speed[cols][None, :]
+    by_class = np.zeros((3, m, m))
+    by_class[0] = np.where(major[rows][:, None], t_h, 0) + np.where(major[cols][None, :], t_v, 0)
+    by_class[2] = (t_h + t_v) - by_class[0]
+    np.save(root / "network" / "drive_time.npy", (t_h + t_v).astype(np.float32))
+    np.save(root / "network" / "drive_dist.npy", (dx + dy).astype(np.float32))
+    np.save(root / "network" / "drive_time_by_class.npy", by_class.astype(np.float32))
+    dxy = (cols * step, rows * step)
+    np.savez(root / "network" / "drive_nodes.npz", osm_id=np.arange(m), lat=42.36 + dxy[1] / 111_000.0,
+             lon=-71.1 + dxy[0] / 82_000.0, x=dxy[0].astype(float), y=dxy[1].astype(float),
+             road_classes=np.array(["major", "secondary", "local"]))
+    gx, gy = np.rint(x / step).astype(int).clip(0, k - 1), np.rint(y / step).astype(int).clip(0, k - 1)
+    b2d = (gy * k + gx).astype(np.int32)
+    np.savez(root / "network" / "bike_to_drive.npz", node=b2d,
+             dist_m=np.hypot(x - gx * step, y - gy * step).astype(np.float32))
 
 
 def _erfinv(y: np.ndarray) -> np.ndarray:

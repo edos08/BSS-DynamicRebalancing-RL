@@ -37,6 +37,7 @@ class RideTimeModel:
     round_q: np.ndarray        # [2, Q] round-trip duration quantiles (s)
     counts: np.ndarray         # [2, B] trips used per cell (after pooling)
     round_counts: np.ndarray   # [2]
+    max_duration_s: float = 10800.0  # no ride is longer (the cleaning limit; the fitted trips respect it)
 
     def band(self, dist_m: np.ndarray) -> np.ndarray:
         return np.clip(np.searchsorted(self.bands_m, dist_m, side="right") - 1, 0, len(self.bands_m) - 2)
@@ -56,8 +57,10 @@ class RideTimeModel:
             for j in range(self.speed_q.shape[1]):
                 m = ~rt & (kind == k) & (b == j)
                 if m.any():
-                    out[m] = dist_m[m] / np.interp(u[m], self.levels, self.speed_q[k, j])
-        return out
+                    with np.errstate(divide="ignore"):
+                        out[m] = dist_m[m] / np.interp(u[m], self.levels, self.speed_q[k, j])
+        # the lowest speed quantile can be 0 m/s: cap at the longest allowed ride (#138)
+        return np.minimum(out, self.max_duration_s)
 
     def cdf(self, t_s, dist_m, kind) -> np.ndarray:
         """P(ride time <= t) for each (t, distance, kind)."""
@@ -74,20 +77,24 @@ class RideTimeModel:
                 if m.any():
                     v = dist_m[m] / t_s[m]  # needed speed: ride is over if actual speed >= v
                     out[m] = 1.0 - np.interp(v, self.speed_q[k, j], self.levels, left=0.0, right=1.0)
+        out[t_s >= self.max_duration_s] = 1.0
         return out
 
     def save(self, path: str | Path) -> None:
         np.savez(path, bands_m=self.bands_m, levels=self.levels, speed_q=self.speed_q, round_q=self.round_q,
-                 counts=self.counts, round_counts=self.round_counts, bike_types=np.array(BIKE_TYPES))
+                 counts=self.counts, round_counts=self.round_counts, bike_types=np.array(BIKE_TYPES),
+                 max_duration_s=np.float64(self.max_duration_s))
 
     @classmethod
     def load(cls, path: str | Path) -> RideTimeModel:
         with np.load(path) as z:
-            return cls(z["bands_m"], z["levels"], z["speed_q"], z["round_q"], z["counts"], z["round_counts"])
+            cap = float(z["max_duration_s"]) if "max_duration_s" in z.files else 10800.0
+            return cls(z["bands_m"], z["levels"], z["speed_q"], z["round_q"], z["counts"], z["round_counts"], cap)
 
 
 def fit_ride_time(trips: pl.DataFrame, place_node: np.ndarray, bike_dist: np.ndarray, external: int,
-                  bands_m=DEFAULT_BANDS_M, min_trips: int = MIN_TRIPS_PER_CELL) -> RideTimeModel:
+                  bands_m=DEFAULT_BANDS_M, min_trips: int = MIN_TRIPS_PER_CELL,
+                  max_duration_s: float = 10800.0) -> RideTimeModel:
     """Fit from valid trips with ``o_place``/``d_place``, ``bike_type`` and ``duration_s``.
 
     ``place_node[p]`` is the bike node of in-city place ``p``. Cells with fewer than ``min_trips``
@@ -128,7 +135,7 @@ def fit_ride_time(trips: pl.DataFrame, place_node: np.ndarray, bike_dist: np.nda
         if len(pool) < min_trips:
             pool = dur[rt]
         round_q[k] = np.quantile(pool, LEVELS) if len(pool) else np.full(len(LEVELS), 600.0)
-    return RideTimeModel(bands, LEVELS.copy(), speed_q, round_q, counts, round_counts)
+    return RideTimeModel(bands, LEVELS.copy(), speed_q, round_q, counts, round_counts, float(max_duration_s))
 
 
 def summary(model: RideTimeModel) -> list[dict]:
