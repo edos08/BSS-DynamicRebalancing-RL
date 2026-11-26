@@ -47,7 +47,7 @@ from bss_sim.simulator import Simulator
 
 BUDGET = {"load_s": 2.0, "week_s": 0.5, "peak_mb": 600.0}
 SCALED = ("load_s", "week_s")       # time budgets are checked on machine-scaled times
-REFERENCE_CALIB_S = None            # set from CI runs (#105); None = no scaling
+REFERENCE_CALIB_S = 0.115           # GitHub ubuntu-latest, Python 3.11 (CI run 45809102526, #105)
 START = "2024-09-16T00:00"
 WEEK = 7 * 86400.0
 

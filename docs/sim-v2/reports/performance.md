@@ -1,6 +1,7 @@
 # Simulator performance (M3)
 
-Budget from spec §12. The `Benchmark` CI job enforces it on every PR, on the synthetic
+Budget from spec §12. The `Benchmark` CI job enforces it on every PR, using times scaled to a
+reference runner (see below), on the synthetic
 Cambridge-size bundle (`python -m bss_sim.bench --make-synthetic DIR`, issue #104), because CI has
 no real data.
 
@@ -22,7 +23,30 @@ Run of PR #116:
 Free-threaded Python runs independent simulators in threads 2.6× faster than one after another
 (4 threads on the runner's 4 vCPUs). On the GIL builds, threads are slightly slower than serial.
 This supports training with many simulators in one process.
-Python 3.14 with the GIL is about 15 % slower than 3.11 on this workload.
+Python 3.14 with the GIL was 15–85 % slower than 3.11 in the runs so far. Part of that is the
+runner, part the interpreter.
+
+### Runner speed varies: budgets are checked on calibrated times
+
+The same commit ran a week in 0.26 s on one 3.14t runner and in 0.52 s on another; its docked week
+was also 2× slower, so the runner itself was slower. On 3.11, runs of identical code ranged from
+0.20 s to 0.35 s. A fixed time limit on shared runners would therefore fail at random.
+
+Each benchmark run also times a fixed pure-Python reference workload (`calib_s`: heap, list and
+dict operations, best of 5). The budget is checked on
+`scaled = measured × 0.115 s / calib_s`, where 0.115 s is the reference workload on a GitHub
+ubuntu-latest runner with Python 3.11. Raw and scaled times are both in the JSON results.
+
+Calibration run (CI run 45809102526):
+
+| Python | reference workload | week (raw) | week (scaled) |
+|---|---|---|---|
+| 3.11 | 0.115 s | 0.20 s | 0.20 s |
+| 3.14 | 0.247 s | 0.37 s | 0.17 s |
+| 3.14t | 0.181 s | 0.27 s | 0.17 s |
+
+Python 3.14 runs the reference workload about 2× slower than 3.11 on these runners, and the
+simulator about 1.5× slower. The scaled times put both on the 3.11 reference machine.
 
 ## Real Cambridge 2024 bundle (this server, shared and loaded)
 
