@@ -21,9 +21,8 @@ This thesis tackles the challenge with a **fully dynamic rebalancing framework**
 
 ---
 
-## 📄 Thesis
-
-You can read the full thesis at [https://hdl.handle.net/20.500.12608/84368](https://hdl.handle.net/20.500.12608/84368)
+📄 Publication
+Paper: E. Scarpel, Fully Dynamic Rebalancing of Dockless Bike-Sharing Systems using Deep Reinforcement Learning, arXiv:2605.14501, 2025. https://arxiv.org/abs/2605.14501
 
 ---
 
