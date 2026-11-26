@@ -78,15 +78,43 @@ def test_destination_level_is_exact(syn):
     np.testing.assert_array_equal(pred, real)
 
 
-@pytest.mark.parametrize("level", ["none", "count", "origin"])
-def test_levels_run(syn, level):
-    sim = make(syn, level=level)
-    sim.run(At(8 * 3600))
-    f = sim.forecast(1800, "quad")
-    assert (f.arrivals_inflight >= 0).all() and f.arrivals_inflight.sum() > 0
+def test_sampled_agrees_with_mean_and_providers(syn):
+    sim = make(syn, oracle=True)
+    sim.run(At(17.5 * 3600))
+    mean = sim.forecast(1800, "quad")
+    s = sim.forecast(1800, "quad", provider="sampled", samples=200)
+    assert s.arrivals.shape == (200, 4) and s.departures.shape == (200, 4)
+    se = s.arrivals_inflight.std(axis=0) / np.sqrt(200) + 1e-9
+    assert (np.abs(s.arrivals_inflight.mean(axis=0) - mean.arrivals_inflight) < 4 * se + 0.05).all()
+    dep_se = s.departures.std(axis=0) / np.sqrt(200)
+    assert (np.abs(s.departures.mean(axis=0) - mean.departures) < 4 * dep_se + 0.5).all()
+    assert sim.metadata()["oracle_used"] is False
+    o = sim.forecast(1800, "quad", provider="oracle")
+    assert o.provider == "oracle" and sim.metadata()["oracle_used"] is True
     with pytest.raises(ValueError):
         sim.forecast(1800, "quad", provider="crystal_ball")
     with pytest.raises(KeyError):
         sim.forecast(1800, "nope")
     with pytest.raises(ValueError):
         sim.forecast(0, "quad")
+
+
+def test_oracle_needs_permission_and_runs_are_reproducible(syn):
+    sim = make(syn)
+    sim.run(At(9 * 3600))
+    with pytest.raises(PermissionError):
+        sim.forecast(1800, "quad", provider="oracle")
+    a = sim.forecast(1800, "quad", provider="sampled", samples=20).arrivals
+    sim2 = make(syn)
+    sim2.run(At(9 * 3600))
+    np.testing.assert_array_equal(a, sim2.forecast(1800, "quad", provider="sampled", samples=20).arrivals)
+
+
+@pytest.mark.parametrize("level", ["none", "count", "origin"])
+def test_levels_run(syn, level):
+    sim = make(syn, level=level)
+    sim.run(At(8 * 3600))
+    f = sim.forecast(1800, "quad")
+    assert (f.arrivals_inflight >= 0).all() and f.arrivals_inflight.sum() > 0
+    s = sim.forecast(1800, "quad", provider="sampled", samples=30)
+    assert s.arrivals_inflight.shape == (30, 4)
