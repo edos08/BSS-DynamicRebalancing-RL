@@ -30,11 +30,12 @@ def _check(cond: bool, msg: str) -> None:
 
 @dataclass(frozen=True)
 class DemandConfig:
-    generator: str = "poisson"          # poisson | replay
+    generator: str = "poisson"          # poisson | replay | none (no users: tests, operator studies)
     replay_seed_jitter: bool = True     # replay: seeded draw of nodes inside each place's catchment
 
     def __post_init__(self):
-        _check(self.generator in ("poisson", "replay"), f"demand.generator must be 'poisson' or 'replay', got {self.generator!r}")
+        _check(self.generator in ("poisson", "replay", "none"),
+               f"demand.generator must be 'poisson', 'replay' or 'none', got {self.generator!r}")
 
 
 @dataclass(frozen=True)

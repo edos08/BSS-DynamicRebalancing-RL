@@ -43,7 +43,7 @@ from bss_sim.partitions import Partition, PartitionCounts
 from bss_sim.rng import Streams
 from bss_sim.scenario import Scenario
 from bss_sim import telemetry
-from bss_sim.commands import Command, CommandResult, GoTo, ToDepot, Wait
+from bss_sim.commands import Command, CommandResult, Drop, GoTo, PickUp, Restock, ToDepot, Wait
 from bss_sim.state import DEPOT, ELECTRIC, ON_TRUCK, RESERVED, RIDING, Fleet, initial_nodes
 from bss_sim.travel import make_travel
 from bss_sim.trucks import COMMAND_DONE, TRUCK_IDLE, Truck, validate
@@ -51,6 +51,10 @@ from bss_sim.users import EXTERNAL_EMPTY, NO_DOCK, REASONS, REQUEST_FAILURES, SE
 
 USER_SLOT_STREAM = 0x5E5
 REDIRECT_FALLBACK_SPEED_MPS = 3.5  # riding pace on to another dock when the trip's own pace is unknown
+
+
+def _requested(cmd) -> int:
+    return int(getattr(cmd, "n", 1))
 
 
 def _parse_start(start) -> dt.datetime:
@@ -170,8 +174,10 @@ class Simulator:
         self.streams = Streams(self.seed)
         if cfg.demand.generator == "poisson":
             self.demand = PoissonDemand(sc.demand, seed=self.streams.int_seed("demand"))
-        else:
+        elif cfg.demand.generator == "replay":
             self.demand = ReplayDemand(sc.demand, sc.root, seed=self.streams.int_seed("demand"))
+        else:
+            self.demand = None
         self._user_seed = self.streams.int_seed("users")
         self._ext_rng = self.streams.generator("external")
         self.travel.bind(self.streams.generator("travel"), self.day0)
@@ -309,6 +315,10 @@ class Simulator:
 
     def check_invariants(self) -> None:
         self.fleet.check()
+        on_trucks = sorted(b for tr in self.trucks for b in tr.load)
+        assert on_trucks == np.flatnonzero(self.fleet.status == ON_TRUCK).tolist(), "bikes on trucks"
+        assert sorted(self.depot_bikes) == np.flatnonzero(self.fleet.status == DEPOT).tolist(), "depot bikes"
+        assert all(len(tr.load) <= self.config.trucks.capacity for tr in self.trucks), "truck over capacity"
         for part in self._parts.values():
             bikes, ebikes = part.recompute_state(self.fleet)
             c = part.counts()
@@ -351,6 +361,9 @@ class Simulator:
 
     # ---------------------------------------------------------------------------------- loop
     def _load_slot(self, k: int) -> None:
+        if self.demand is None:
+            self._rq, self._ri, self._rn = [], 0, 0
+            return
         date = self.day0 + dt.timedelta(days=k // 24)
         req = self.demand.hour(date, k % 24)
         t = req.t_s + (k // 24) * 86400.0
@@ -573,22 +586,47 @@ class Simulator:
         """Start the next queued command; emit ``truck_idle`` when there is none."""
         while tr.queue:
             cmd = tr.queue.popleft()
-            reason = validate(cmd, self.scenario.n_nodes)
+            reason = validate(cmd, self.scenario.n_nodes) or self._check(tr, cmd)
             if reason:
-                self._result(tr, CommandResult(tr.id, cmd, 0, 0, self.now, self.now, reason))
+                self._result(tr, CommandResult(tr.id, cmd, _requested(cmd), 0, self.now, self.now, reason))
                 continue
             tr.current, tr.t_start = cmd, self.now
             tr.serial += 1
-            self._start(tr, cmd)
-            return
+            if self._start(tr, cmd):
+                return
         tr.current = None
         self._notes.append(Notification(self.now, TRUCK_IDLE, {"truck": tr.id, "reason": "queue_empty"}))
+
+    def _check(self, tr: Truck, cmd: Command) -> str:
+        """State-dependent validity, checked when the command starts."""
+        wmax = self.scenario.walk_max_m
+        if isinstance(cmd, PickUp) and cmd.radius_m > wmax:
+            return f"invalid: radius_m above the bundle's walking neighbours ({wmax} m)"
+        if isinstance(cmd, Drop) and cmd.at is not None:
+            reach = self._within(tr.stop, self.config.trucks.max_spread_m)
+            if any(v not in reach for v in cmd.at):
+                return "invalid: Drop(at=...) node out of reach of the stop"
+        if isinstance(cmd, Restock) and tr.stop != self.depot_stop:
+            return "not_at_depot"
+        return ""
 
     def _busy_until(self, tr: Truck, t: float) -> None:
         tr.eta = t
         self.queue.push(t, TRUCK, tr.id, tr.serial)
 
-    def _start(self, tr: Truck, cmd: Command) -> None:
+    def _service(self, tr: Truck, k: int, per_bike: float) -> None:
+        tr.planned = k
+        dur = self.config.trucks.stop_overhead_s + k * per_bike
+        tr.service_s += dur
+        self._busy_until(tr, self.now + dur)
+
+    def _finish(self, tr: Truck, requested: int, executed: int, reason: str = "") -> None:
+        self._result(tr, CommandResult(tr.id, tr.current, requested, executed, tr.t_start, self.now, reason))
+        tr.current = None
+
+    def _start(self, tr: Truck, cmd: Command) -> bool:
+        """Begin ``cmd``; False when it finished at once (nothing to do), True when it takes time."""
+        tc = self.config.trucks
         if isinstance(cmd, (GoTo, ToDepot)):
             stop = cmd.node if isinstance(cmd, GoTo) else self.depot_stop
             dest = self._b2d[stop] if isinstance(cmd, GoTo) else self.depot_drive
@@ -600,12 +638,123 @@ class Simulator:
         elif isinstance(cmd, Wait):
             tr.wait_s += cmd.seconds
             self._busy_until(tr, self.now + cmd.seconds)
+        elif isinstance(cmd, PickUp):
+            room = tc.capacity - len(tr.load)
+            avail = len(self._pickable(tr.stop, cmd))
+            k = min(cmd.n, room, avail)
+            tr.limit = "" if k == cmd.n else ("truck_full" if room < min(cmd.n, avail) else "not_enough_bikes")
+            if k == 0:
+                self._finish(tr, cmd.n, 0, tr.limit)
+                return False
+            self._service(tr, k, tc.pickup_per_bike_s)
+        elif isinstance(cmd, Drop):
+            docks = self._free_docks(self._drop_targets(tr, cmd))
+            k = min(cmd.n, len(tr.load), docks)
+            tr.limit = "" if k == cmd.n else ("no_docks" if docks < min(cmd.n, len(tr.load)) else "not_enough_bikes_on_truck")
+            if k == 0:
+                self._finish(tr, cmd.n, 0, tr.limit)
+                return False
+            self._service(tr, k, tc.drop_per_bike_s)
+        elif isinstance(cmd, Restock):
+            tr.service_s += tc.depot_restock_s
+            self._busy_until(tr, self.now + tc.depot_restock_s)
+        return True
 
     def _truck_done(self, tr: Truck) -> None:
         cmd = tr.current
         if isinstance(cmd, (GoTo, ToDepot)):
             tr.stop, tr.drive_node = tr.target
             tr.target = None
-        self._result(tr, CommandResult(tr.id, cmd, 1, 1, tr.t_start, self.now))
-        tr.current = None
+            self._finish(tr, 1, 1)
+        elif isinstance(cmd, Wait):
+            self._finish(tr, 1, 1)
+        elif isinstance(cmd, PickUp):
+            self._do_pickup(tr, cmd)
+        elif isinstance(cmd, Drop):
+            self._do_drop(tr, cmd)
+        elif isinstance(cmd, Restock):
+            self._do_restock(tr, cmd)
         self._next_command(tr)
+
+    # --- services -------------------------------------------------------------------------
+    def _within(self, node: int, radius_m: float) -> list[int]:
+        """Bike nodes within ``radius_m`` walking distance of ``node`` (nearest first, itself first)."""
+        sc = self.scenario
+        a, b = int(sc.walk_indptr[node]), int(sc.walk_indptr[node + 1])
+        k = int(np.searchsorted(sc.walk_dist[a:b], radius_m, side="right"))
+        return sc.walk_indices[a:a + k].tolist()
+
+    def _pickable(self, stop: int, cmd: PickUp) -> list[int]:
+        """Parked bikes in reach, in the order the policy takes them."""
+        f = self.fleet
+        near = [(i, b) for i, v in enumerate(self._within(stop, cmd.radius_m)) for b in f.bikes_at(v)]
+        if cmd.policy == "lowest_battery":
+            e = sorted((f._batt[b], i, b) for i, b in near if f.kind_l[b] == ELECTRIC)
+            return [b for _, _, b in e] + [b for i, b in near if f.kind_l[b] != ELECTRIC]
+        return [b for _, b in near]
+
+    def _drop_targets(self, tr: Truck, cmd: Drop) -> list[int]:
+        return list(cmd.at) if cmd.at else [tr.stop]
+
+    def _free_docks(self, nodes: list[int]) -> int:
+        if not self._docked:
+            return 1 << 30
+        nb = self.fleet._nb
+        return sum(max(0, self._cap[v] - nb[v]) for v in set(nodes))
+
+    def _do_pickup(self, tr: Truck, cmd: PickUp) -> None:
+        room = self.config.trucks.capacity - len(tr.load)
+        take = self._pickable(tr.stop, cmd)[:min(tr.planned, room)]
+        for b in take:
+            self.fleet.unpark(b, ON_TRUCK)
+            tr.load.append(b)
+        tr.picked += len(take)
+        reason = "taken_meanwhile" if len(take) < tr.planned else tr.limit
+        self._finish(tr, cmd.n, len(take), reason)
+
+    def _do_drop(self, tr: Truck, cmd: Drop) -> None:
+        f = self.fleet
+        # e-bikes with the most charge first, then classic bikes
+        order = sorted(tr.load, key=lambda b: (f.kind_l[b] != ELECTRIC, -f._batt[b]))
+        targets = self._drop_targets(tr, cmd)
+        placed, i = 0, 0
+        for b in order[:tr.planned]:
+            for _ in range(len(targets)):  # round-robin over targets with room
+                v = targets[i % len(targets)]
+                i += 1
+                if not self._docked or f._nb[v] < self._cap[v]:
+                    tr.load.remove(b)
+                    f.park(b, v)
+                    placed += 1
+                    break
+            else:
+                break
+        tr.dropped += placed
+        reason = "docks_taken_meanwhile" if placed < tr.planned else tr.limit
+        self._finish(tr, cmd.n, placed, reason)
+
+    def _do_restock(self, tr: Truck, cmd: Restock) -> None:
+        tc, f = self.config.trucks, self.fleet
+        full = self.battery.range_km
+        tr.stock = tc.battery_stock_max if cmd.batteries is None else min(cmd.batteries, tc.battery_stock_max)
+        tr.used = 0
+        reason, moved, before = "", 0, len(tr.load)
+        if cmd.load is not None:
+            target = min(max(cmd.load, 0), tc.capacity)
+            while len(tr.load) > target:                 # unload to the depot
+                b = tr.load.pop()
+                f.set_status(b, DEPOT)
+                self.depot_bikes.append(b)
+                moved += 1
+            while len(tr.load) < target and self.depot_bikes:
+                b = self.depot_bikes.pop()
+                f.set_status(b, ON_TRUCK)
+                tr.load.append(b)
+                moved += 1
+            if len(tr.load) < target:
+                reason = "depot_empty"
+        for b in tr.load:                                # charged at the depot
+            if f.kind_l[b] == ELECTRIC:
+                f._batt[b] = full
+        requested = 0 if cmd.load is None else abs(min(max(cmd.load, 0), tc.capacity) - before)
+        self._finish(tr, requested, moved, reason)
