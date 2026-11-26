@@ -123,6 +123,25 @@ def build_stations(
     return stations.select(list(STATIONS_SCHEMA)).cast(STATIONS_SCHEMA)
 
 
+def write_stations(stations: pl.DataFrame, out_dir: str | Path) -> None:
+    """Write ``stations.parquet`` and ``stations.npz``.
+
+    The npz holds the **in-city** stations as plain arrays for the simulator, which never reads
+    Parquet (spec §3). They are sorted by ``station_id``, so index ``i`` is demand place ``i``.
+    Arrays: ``station_id`` (str), ``bike_node`` (int32), ``capacity`` (int32), ``lat``, ``lon`` (float64).
+    """
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stations.write_parquet(out_dir / "stations.parquet")
+    city = stations.filter("in_city").sort("station_id")
+    np.savez(out_dir / "stations.npz",
+             station_id=np.array(city["station_id"].to_list(), dtype=str),
+             bike_node=city["bike_node"].to_numpy().astype(np.int32),
+             capacity=city["capacity"].to_numpy().astype(np.int32),
+             lat=city["lat"].to_numpy().astype(np.float64),
+             lon=city["lon"].to_numpy().astype(np.float64))
+
+
 def stations_report(stations: pl.DataFrame) -> dict:
     city = stations.filter("in_city")
     return {

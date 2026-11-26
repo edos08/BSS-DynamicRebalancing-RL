@@ -159,13 +159,14 @@ def _cmd_stations(args: argparse.Namespace) -> int:
     import json
 
     from bss_scenario.network import Projection
-    from bss_scenario.stations import build_stations, stations_report
+    from bss_scenario.stations import build_stations, stations_report, write_stations
 
     net_report = json.loads((args.network / "network_report.json").read_text())
     stations = build_stations(sorted(args.trips.glob("*.parquet")), args.boundary, args.gbfs,
                               args.network / "bike_nodes.parquet", Projection(**net_report["projection"]))
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    stations.write_parquet(args.out)
+    if args.out.name != "stations.parquet":
+        raise SystemExit("--out must end with stations.parquet (stations.npz is written next to it)")
+    write_stations(stations, args.out.parent)
     report = stations_report(stations)
     (args.out.parent / "stations_report.json").write_text(json.dumps(report, indent=2) + "\n")
     print(json.dumps(report, indent=2))
