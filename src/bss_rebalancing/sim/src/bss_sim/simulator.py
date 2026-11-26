@@ -799,11 +799,11 @@ class Simulator:
         busy = tr.drive_s + tr.service_s + tr.wait_s
         if tr.busy:   # do not count the part of the current command that is still to come
             busy -= max(0.0, tr.eta - self.now)
-        hours = shift_s / 3600.0
+        hours = busy / 3600.0     # the driver is paid for working time (driving, service, waits)
         return {"km": tr.km, "drive_s": tr.drive_s, "service_s": tr.service_s, "wait_s": tr.wait_s,
                 "idle_s": max(0.0, shift_s - busy), "commands": tr.commands_done, "picked_up": tr.picked,
                 "dropped": tr.dropped, "batteries_swapped": tr.swapped, "kwh": tr.kwh,
-                "kwh_since_depot": tr.kwh_since_depot, "energy_flags": tr.energy_flags,
+                "kwh_since_depot": tr.kwh_since_depot, "energy_flags": tr.energy_flags, "paid_hours": hours,
                 "cost_usd": self.costs.cost_usd(tr.kwh, hours, tr.km, tr.swapped),
                 "kgco2e": self.costs.kgco2e(tr.kwh)}
 

@@ -29,7 +29,7 @@ figure, and about 0.24 kWh/km at 25 km/h with three stops per km (Cambridge stre
 * electricity 0.22 USD/kWh: EIA, Massachusetts commercial price, October 2025 (21.98 ¢/kWh);
   energy from the grid = battery energy / charging efficiency (0.90, assumption);
 * driver 22.68 USD/h: BLS OEWS May 2021, light truck drivers (53-3033), Boston-Cambridge-Nashua
-  (wages only, no overhead), per truck-hour from the start of the run;
+  (wages only, no overhead), per hour of work (driving, service, waits; an idle truck costs nothing);
 * van 0.10 USD/km: maintenance and tyres (assumption; no local source);
 * battery swaps 0 USD each by default: their handling time is already paid as driver time.
 

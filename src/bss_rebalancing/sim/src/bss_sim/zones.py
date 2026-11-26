@@ -40,8 +40,9 @@ def _stops(scenario, node_to_zone: np.ndarray, n: int, how: str) -> tuple[np.nda
     keep = node_to_zone >= 0
     z = node_to_zone[keep]
     count = np.bincount(z, minlength=n).astype(float)
-    cx = np.bincount(z, weights=x[keep], minlength=n) / count
-    cy = np.bincount(z, weights=y[keep], minlength=n) / count
+    with np.errstate(invalid="ignore", divide="ignore"):   # a zone can be empty (two stations on one node)
+        cx = np.bincount(z, weights=x[keep], minlength=n) / count
+        cy = np.bincount(z, weights=y[keep], minlength=n) / count
     d2 = (x - cx[np.maximum(node_to_zone, 0)]) ** 2 + (y - cy[np.maximum(node_to_zone, 0)]) ** 2
     weight = scenario.departure_weights() if how == "demand" else np.zeros(len(x))
     stop = np.empty(n, dtype=np.int32)
@@ -76,4 +77,6 @@ def station_zones(scenario, name: str = "stations") -> Zones:
     node_to_zone[sp.nodes[order]] = place[order]
     node_to_zone[sp.station_nodes] = np.arange(sp.n)     # a station's own node is in its zone
     _, center = _stops(scenario, node_to_zone, sp.n, "center")
+    empty = ~np.isfinite(center[:, 0])     # a station sharing its node with another: centred on it
+    center[empty] = np.column_stack([scenario.bike_x, scenario.bike_y])[sp.station_nodes[empty]]
     return Zones(name, node_to_zone, sp.station_nodes.astype(np.int32).copy(), center)

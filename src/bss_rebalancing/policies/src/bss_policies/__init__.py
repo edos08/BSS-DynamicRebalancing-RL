@@ -6,7 +6,8 @@ run); ``bss_sim`` never imports this package.
 
 from bss_policies.base import Controller, EpisodeResult, run_episode
 from bss_policies.donothing import DoNothing
+from bss_policies.static_tsp import StaticTSP
 
 __version__ = "0.1.0"
 
-__all__ = ["Controller", "DoNothing", "EpisodeResult", "run_episode", "__version__"]
+__all__ = ["Controller", "DoNothing", "EpisodeResult", "StaticTSP", "run_episode", "__version__"]
