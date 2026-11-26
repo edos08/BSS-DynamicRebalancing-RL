@@ -5,6 +5,7 @@ import subprocess
 import gymnasium
 from dataclasses import dataclass
 import torch
+import pandas as pd
 import argparse
 import gc
 import warnings
@@ -23,6 +24,7 @@ from gymnasium_env.simulator.utils import Actions
 from gymnasium_env.envs.fully_dynamic_env import EnvDefaults, RewardComponents
 
 from rl_training.agents import DQNAgent
+from rl_training.checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint
 from rl_training.memory import ReplayBuffer
 from rl_training.results import ResultsManager, EpisodeResults
 from rl_training.logging_config import init_logging, LoggingConfig, get_logger
@@ -208,6 +210,28 @@ def create_parser() -> argparse.ArgumentParser:
         help='Performs only one validation at the end of the training.'
     )
 
+    parser.add_argument(
+        '--resume',
+        action='store_true',
+        help='Continue the run from its last checkpoint (results/run_NNN/checkpoints).'
+    )
+    parser.add_argument(
+        '--checkpoint-every',
+        type=int,
+        default=1,
+        help='Save a full training checkpoint every N episodes (0 = never).'
+    )
+    parser.add_argument(
+        '--keep-checkpoints',
+        type=int,
+        default=2,
+        help='Number of checkpoints kept.'
+    )
+    parser.add_argument(
+        '--no-buffer-checkpoint',
+        action='store_true',
+        help='Do not save the replay buffer in checkpoints (a resume then starts with an empty buffer).'
+    )
     return parser
 
 
@@ -682,9 +706,10 @@ def main():
     results_manager = ResultsManager(
         results_path=results_path,
         run_id=run_id,
-        overwrite=False,
-        interactive=True
+        overwrite=args.resume,
+        interactive=not args.resume
     )
+    checkpoint_dir = results_manager.run_dir / "checkpoints"
 
     # Init logging
     init_logging(LoggingConfig(
@@ -747,12 +772,31 @@ def main():
     print("Model initialized successfully.\n")
 
     # ------------------------------------------------------------------
+    # Resume (issue #170)
+    # ------------------------------------------------------------------
+    start_episode = 0
+    resumed_best = float("inf")
+    if args.resume:
+        ckpt = latest_checkpoint(checkpoint_dir)
+        if ckpt is None:
+            raise SystemExit(f"--resume: no checkpoint in {checkpoint_dir}")
+        state = load_checkpoint(ckpt, agent)
+        start_episode = state["episode"] + 1
+        resumed_best = state["extra"].get("best_val", float("inf"))
+        summary = results_manager.training_path / "train_summary.csv"
+        if summary.exists():
+            df = pd.read_csv(summary)
+            results_manager.training_summary = df[df["episode"] < start_episode]
+        print(f"Resumed from {ckpt.name}: next episode {start_episode}, epsilon {agent.epsilon:.3f}, "
+              f"buffer {len(agent.replay_buffer)}\n")
+
+    # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
     num_days = params["total_timeslots"] / 8  # float: stays valid for episodes shorter than a day
 
     # Best validation score tracker (lower mean_daily_failures = better)
-    best_val_score = float("inf")
+    best_val_score = resumed_best
 
     # Holds the currently running validation subprocess (if any).
     # There is at most one pending validation at a time; we collect it
@@ -762,6 +806,7 @@ def main():
     try:
         tbar = tqdm(
             range(int(params["total_timeslots"] * params["num_episodes"])),
+            initial=int(params["total_timeslots"] * start_episode),
             desc="Training computation is starting ",
             position=0,
             leave=True,
@@ -771,7 +816,7 @@ def main():
         logger.info(f"Training started with the following parameters: {params}")
 
         # Train loop
-        for episode in range(int(params["num_episodes"])):
+        for episode in range(start_episode, int(params["num_episodes"])):
             current_seed = int(params['seed'] + episode)
             # ------------------------------------------------------------------
             # Train one episode
@@ -893,6 +938,10 @@ def main():
                 f"Invalid Actions = {training_results.total_invalid_actions}, "
                 f"Epsilon = {agent.epsilon:.4f}"
             )
+
+            if args.checkpoint_every and (episode + 1) % args.checkpoint_every == 0:
+                save_checkpoint(checkpoint_dir, agent, {"best_val": best_val_score}, episode=episode,
+                                buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
 
             gc.collect()
 

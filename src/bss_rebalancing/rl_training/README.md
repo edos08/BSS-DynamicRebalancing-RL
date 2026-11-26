@@ -123,6 +123,23 @@ limit). The results use the legacy layout (`results/run_NNN/training/episode_NNN
 evaluation on held-out weeks in `validation/`, models in `models/`), so `bss-results-webapp` shows
 them next to the legacy runs.
 
+### Checkpoints, resume and best model
+
+Both `bss-train` (legacy env) and `python -m rl_training.train_grid` (GridZoneEnv) save a full training
+checkpoint every episode in `results/run_NNN/checkpoints/` (issue #170). It holds the networks, the
+optimizer, epsilon, the RNG states and the replay buffer; the last 2 are kept and writes are atomic.
+
+- Add `--resume` to the same command to continue an interrupted run exactly where it stopped. With
+  `train_grid`, a resumed run is bit-identical to an uninterrupted one (tested).
+- `--checkpoint-every N`, `--keep-checkpoints K`, and `--no-buffer-checkpoint` (smaller files; the
+  replay buffer restarts empty) change what is saved.
+- `train_grid --stop-after N` stops after N episodes, to train in slices.
+
+**Best model.** `train_grid` validates the greedy policy every `--val-every 5` episodes on a held-out
+week (`--val-date`) and keeps the best as `models/model_best.pt`. DQN performance oscillates, so the
+last weights are often not the best. `bss-train` does the same with its validation subprocesses
+(`models/best/`), unless `--one-validation` is given.
+
 ## Training Parameters
 
 ### CLI Arguments

@@ -13,6 +13,14 @@ per slot so that it reaches ~0.1 after ``exploration_time`` of the training), wi
 * ``terminal`` only for true terminal states. Episodes end by time limit, so the last state still
   bootstraps.
 
+**Checkpoints and best model** (issue #170).
+* Every ``--checkpoint-every`` episodes the whole training state is saved to ``checkpoints/``:
+  networks, optimizer, epsilon, RNG states and replay buffer. ``--resume`` continues an interrupted
+  run exactly where it stopped.
+* Every ``--val-every`` episodes the greedy policy is evaluated on ``--val-date`` (a held-out week).
+  The best one by city service level is kept as ``models/model_best.pt``: DQN performance
+  oscillates during training, so the final weights are often not the best.
+
 Results use the legacy layout, so ``bss-results-webapp`` shows them next to the legacy runs:
 ``<results>/run_NNN/training/episode_NNN/`` (scalars, per-3 h timeslot metrics, step data, zone
 graph with per-zone means), the greedy evaluation on held-out weeks as
@@ -32,7 +40,10 @@ import torch
 from shapely.geometry import box
 from torch_geometric.data import Data
 
+import pandas as pd
+
 from rl_training.agents import DQNAgent
+from rl_training.checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint
 from rl_training.memory import ReplayBuffer
 from rl_training.results import EpisodeResults, ResultsManager
 from rl_training.utils import set_seed
@@ -187,6 +198,15 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--gamma", type=float, default=PARAMS["gamma"])
     ap.add_argument("--save-every", type=int, default=5, help="save the model every N episodes")
+    ap.add_argument("--checkpoint-every", type=int, default=1, help="save a full training checkpoint every N episodes")
+    ap.add_argument("--keep-checkpoints", type=int, default=2)
+    ap.add_argument("--no-buffer-checkpoint", action="store_true",
+                    help="do not save the replay buffer in checkpoints (smaller; a resume starts with an empty buffer)")
+    ap.add_argument("--resume", action="store_true", help="continue the run from its last checkpoint")
+    ap.add_argument("--stop-after", type=int, default=None,
+                    help="stop after N episodes in this invocation (resume later with --resume)")
+    ap.add_argument("--val-every", type=int, default=5, help="validate the greedy policy every N episodes (0: never)")
+    ap.add_argument("--val-date", default=None, help="week used for validation (default: the first --eval-dates)")
     args = ap.parse_args(argv)
     params = {**PARAMS, "gamma": args.gamma}
     set_seed(args.seed)
@@ -199,12 +219,29 @@ def main(argv=None) -> int:
     agent = DQNAgent(num_actions=8, observation_space_len=env.agent_len, replay_buffer=ReplayBuffer(params["buffer"]),
                      gamma=params["gamma"], epsilon_start=params["epsilon_start"], epsilon_end=params["epsilon_end"],
                      epsilon_decay=T * T / math.log(10.0), lr=params["lr"], device=args.device, seed=args.seed)
-    rm = ResultsManager(args.results_path, args.run_id, overwrite=args.overwrite, interactive=False)
-    rm.save_hyperparameters(
-        params={**params, **{k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-                "env": "bss_gym.GridZoneEnv", "zones": env.n_zones, "agent_len": env.agent_len, "smdp": True},
-        reward_params=vars(env.reward_cfg))
+    rm = ResultsManager(args.results_path, args.run_id, overwrite=args.overwrite or args.resume, interactive=False)
+    ckpt_dir = rm.run_dir / "checkpoints"
     slots = {"n": 0}
+    start_episode, best = 0, -np.inf
+    if args.resume:
+        path = latest_checkpoint(ckpt_dir)
+        if path is None:
+            raise SystemExit(f"--resume: no checkpoint in {ckpt_dir}")
+        state = load_checkpoint(path, agent)
+        start_episode = state["episode"] + 1
+        slots["n"] = state["extra"].get("slots", 0)
+        best = state["extra"].get("best_val", -np.inf)
+        summary = rm.training_path / "train_summary.csv"
+        if summary.exists():   # keep the episodes already saved in the run summary
+            rm.training_summary = pd.read_csv(summary)
+            rm.training_summary = rm.training_summary[rm.training_summary["episode"] < start_episode]
+        print(f"resumed from {path.name}: next episode {start_episode}, epsilon {agent.epsilon:.3f}, "
+              f"buffer {len(agent.replay_buffer)}, best validation {best:.4f}", flush=True)
+    else:
+        rm.save_hyperparameters(
+            params={**params, **{k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
+                    "env": "bss_gym.GridZoneEnv", "zones": env.n_zones, "agent_len": env.agent_len, "smdp": True},
+            reward_params=vars(env.reward_cfg))
 
     def on_slot():
         slots["n"] += 1
@@ -212,7 +249,10 @@ def main(argv=None) -> int:
         if slots["n"] % params["target_every_slots"] == 0:
             agent.update_target_network()
 
-    for ep in range(args.episodes):
+    val_env = None
+    val_date = args.val_date or args.eval_dates[0]
+    stop_at = args.episodes if args.stop_after is None else min(args.episodes, start_episode + args.stop_after)
+    for ep in range(start_episode, stop_at):
         res, s = run_episode(env, agent, seed=args.seed * 1000 + ep, device=args.device, learn=True, params=params,
                              on_slot=on_slot, cell_m=args.cell_m, episode=ep)
         rm.save_episode(res)
@@ -222,12 +262,33 @@ def main(argv=None) -> int:
               f"wall {s['wall_s']:.0f}s", flush=True)
         if (ep + 1) % args.save_every == 0 or ep == args.episodes - 1:
             agent.save_model(rm.models_path / f"model_episode_{ep:03d}.pt")
+        if args.val_every and (ep + 1) % args.val_every == 0:
+            if val_env is None:
+                val_env = make_env(args.bundle, [val_date], args.days, sim_config, args.cell_m)
+            saved_eps = agent.epsilon
+            vres, vs = run_episode(val_env, agent, seed=20_000, device=args.device, learn=False, params=params,
+                                   cell_m=args.cell_m, episode=0, mode="validation")
+            agent.epsilon = saved_eps
+            ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False, mode="validation",
+                           val_tag=f"episode_{ep:03d}").save_episode(vres)
+            improved = vs["city_service_level"] > best
+            if improved:
+                best = vs["city_service_level"]
+                agent.save_model(rm.models_path / "model_best.pt")
+            print(f"val ep {ep:3d} ({val_date}): served {vs['city_service_level']:.4f} failures {vs['failed']} "
+                  f"{'NEW BEST' if improved else f'best {best:.4f}'}", flush=True)
+        if args.checkpoint_every and (ep + 1) % args.checkpoint_every == 0:
+            save_checkpoint(ckpt_dir, agent, {"slots": slots["n"], "best_val": best}, episode=ep,
+                            buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
+    if stop_at < args.episodes:
+        print(f"stopped after episode {stop_at - 1}; continue with --resume", flush=True)
+        return 0
     agent.save_model(rm.models_path / "model_final.pt")
 
     # greedy evaluation on held-out weeks, as the webapp's validation view
     eval_env = make_env(args.bundle, args.eval_dates, args.days, sim_config, args.cell_m)
     val = ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False, mode="validation",
-                         val_tag=f"episode_{args.episodes - 1:03d}")
+                         val_tag=f"final_episode_{args.episodes - 1:03d}")
     i = 0
     for d, day in enumerate(args.eval_dates):
         eval_env.start_dates = (day,)
