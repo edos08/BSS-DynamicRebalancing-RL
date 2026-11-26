@@ -82,3 +82,11 @@ def test_cli(setup, capsys):
     assert pl.read_parquet(out).height == 3
     report = json.loads((out.parent / "stations_report.json").read_text())
     assert report["in_city"] == 2 and report["not_in_gbfs_in_city"] == ["B1"]
+    with np.load(out.parent / "stations.npz") as z:  # in-city stations only, sorted, plain arrays
+        assert z["station_id"].tolist() == ["A1", "B1"]
+        assert z["bike_node"].tolist() == [0, 1] and z["bike_node"].dtype == np.int32
+        assert z["capacity"].tolist() == [19, 19] and z["capacity"].dtype == np.int32
+        assert z["lat"].dtype == np.float64 and not z["station_id"].dtype.hasobject
+    with pytest.raises(SystemExit):
+        cli.main(["stations", "--trips", str(trips_dir), "--boundary", str(boundary), "--gbfs", str(gbfs),
+                  "--network", str(net), "--out", str(tmp / "x.parquet")])

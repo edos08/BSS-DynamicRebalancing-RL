@@ -109,6 +109,7 @@ data/scenarios/cambridge-2024/
 │   └── network_report.json
 ├── stations/
 │   ├── stations.parquet       # station_id, name, lat, lon, in_city, usage, capacity (+source), bike_node
+│   ├── stations.npz           # in-city stations as arrays for the simulator (id, bike_node, capacity, lat, lon)
 │   └── stations_report.json
 ├── traffic/                   # (#57) congestion factors per day type x hour x road class
 └── demand/                    # (M2) shape, volume, spreading, durations
