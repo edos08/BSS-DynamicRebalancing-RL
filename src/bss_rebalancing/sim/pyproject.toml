@@ -17,7 +17,8 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=7.4"]
+logs = ["pyarrow>=14"]   # Parquet event logs (npz needs nothing extra)
+dev = ["pytest>=7.4", "pyarrow>=14"]
 
 [project.urls]
 Repository = "https://github.com/edos08/BSS-DynamicRebalancing-RL"

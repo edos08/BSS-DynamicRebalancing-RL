@@ -529,6 +529,12 @@ always available in memory: service level, failures by reason, walk distances, b
 batteries swapped, and per truck km, driving/service/idle time, kWh, operating cost and CO2e (§9).
 The results web app reads the logs.
 
+Implementation (#103, `bss_sim.telemetry`):
+- **Event log**: one row per outcome, with columns `t`, `event`, `request`, `bike`, `node`, `outcome` (reason) and `value` (walk m, ride s or extra m).
+  - `sim.save_log("run.npz" | "run.parquet")` embeds the run metadata: bundle, config and hash, seed, start, versions. Parquet needs the optional `pyarrow` (`bss-sim[logs]`).
+- **Snapshots**: parked bikes per node every `telemetry.snapshot_every_s`, saved next to the log.
+- **KPIs**: `sim.kpis()`. Walking statistics (mean, share who walked, p50 and p90 from 10 m bins) cover requests that start in the city.
+
 **Validation plan**
 
 1. Unit tests and invariants (fleet conservation, non-negative counts, capacity limits).
