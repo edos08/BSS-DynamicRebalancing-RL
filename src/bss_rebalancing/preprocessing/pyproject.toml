@@ -86,4 +86,4 @@ bss-preprocess = "preprocessing.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-preprocessing = ["*.json", "*.yml", "*.yaml"]
+"*" = ["*.json", "*.yml", "*.yaml"]

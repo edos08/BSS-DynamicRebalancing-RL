@@ -77,8 +77,8 @@ Examples:
     parser.add_argument(
         "--cell-size",
         type=int,
-        default=300,
-        help="Cell size in meters for truck grid (default: 300)",
+        default=None,
+        help="Cell size in meters for truck grid (default: the source's cell_size, 300 for the bundled sources)",
     )
 
     parser.add_argument(
@@ -258,7 +258,7 @@ def main():
         source_id=src.id,
         sources_json=args.sources_json,
         data_path=args.data_path,
-        cell_size=src.cell_size,
+        cell_size=args.cell_size if args.cell_size is not None else src.cell_size,
     )
 
     # Handle plot mode (skips preprocessing)

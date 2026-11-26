@@ -56,17 +56,9 @@ params = {
     "tau": 0.005,
     "enable_repositioning": False,
     "use_net_flow": False,
+    "critic_mode": "poisson",
     "depot_position_id": 18,
     "initial_cell_id": 18,
-}
-
-reward_params = {
-    "W_ZERO_BIKES": 1.0,
-    "W_CRITICAL_ZONES": 1.0,
-    "W_DROP_PICKUP": 0.9,
-    "W_MOVEMENT": 0.7,
-    "W_CHARGE_BIKE": 0.9,
-    "W_STAY": 0.7,
 }
 
 # ------------------------------------------------------------------------------
@@ -166,6 +158,13 @@ Examples:
         action="store_true",
         help="Use net-flow repositioning strategy."
     )
+    parser.add_argument(
+        "--critic-mode",
+        choices=["poisson", "oracle"],
+        default=params["critic_mode"],
+        help="Critic forecast: 'poisson' (sampled from the demand rates, default) or 'oracle' "
+             "(realised future trips). Use the mode the model was trained with."
+    )
 
     # --- misc ---
     parser.add_argument(
@@ -252,6 +251,7 @@ def validate_dqn(
         'minimum_number_of_bikes': params["minimum_number_of_bikes"],
         'enable_repositioning': params["enable_repositioning"],
         'use_net_flow': params["use_net_flow"],
+        'critic_mode': params["critic_mode"],
         'discount_factor': params["gamma"],
         'depot_id': params['depot_position_id'],
         # 'initial_cell': params['initial_cell_id'],
@@ -444,6 +444,7 @@ def main():
     params["minimum_number_of_bikes"] = args.min_num_bikes
     params["enable_repositioning"] = args.enable_repositioning
     params["use_net_flow"] = args.use_net_flow
+    params["critic_mode"] = args.critic_mode
 
     set_seed(params["seed"])
 
@@ -564,7 +565,7 @@ def main():
     # Validation loop
     # ------------------------------------------------------------------
     best_score = float("inf")
-    num_days = int(params["total_timeslots"] // 8)
+    num_days = params["total_timeslots"] / 8  # float: stays valid for episodes shorter than a day
 
     try:
         tbar = tqdm(

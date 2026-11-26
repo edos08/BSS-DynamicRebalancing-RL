@@ -75,6 +75,7 @@ params = {
     "minimum_number_of_bikes": 1,           # Minimum number of bikes per cell
     "enable_repositioning": False,          # Use base repositioning strategy at the start of each episode
     "use_net_flow": False,                  # Use net flow repositioning strategy at the start of each episode
+    "critic_mode": "poisson",               # Critic forecast: "poisson" (sampled from rates) or "oracle" (realised future trips)
     "depot_position_id": 18,                # ID (cell) of the depot position
     "initial_cell_id": 18,                  # Initial cell where the truck starts
 
@@ -184,6 +185,13 @@ def create_parser() -> argparse.ArgumentParser:
         help='Use net-flow-based repositioning instead of random at the start of each episode.'
     )
     parser.add_argument(
+        '--critic-mode',
+        choices=['poisson', 'oracle'],
+        default=params['critic_mode'],
+        help='How the critic score anticipates future demand: "poisson" = forecast sampled from the demand '
+             'rates, independent of the simulated trips (default); "oracle" = reads the realised future trips.'
+    )
+    parser.add_argument(
         '--exploration-time',
         type=float,
         default=params['exploration_time'],
@@ -198,7 +206,7 @@ def create_parser() -> argparse.ArgumentParser:
         '--one-validation',
         action='store_true',
         help='Performs only one validation at the end of the training.'
-    )  # TODO: fix this feature
+    )
 
     return parser
 
@@ -243,6 +251,7 @@ def _build_validate_cmd(
         total_timeslots: int,
         enable_repositioning: bool,
         use_net_flow: bool,
+        critic_mode: str,
 ) -> list[str]:
     """
     Build the argv list to invoke validate.py as a completely independent subprocess
@@ -262,6 +271,7 @@ def _build_validate_cmd(
         "--max-num-bikes", str(max_num_bikes),
         "--min-num-bikes", str(min_num_bikes),
         "--total-timeslots", str(total_timeslots),
+        "--critic-mode", critic_mode,
         "--non-interactive",
     ]
     if enable_repositioning:
@@ -422,6 +432,7 @@ def train_dqn(
         'minimum_number_of_bikes': params["minimum_number_of_bikes"],
         'enable_repositioning': params["enable_repositioning"],
         'use_net_flow': params["use_net_flow"],
+        'critic_mode': params["critic_mode"],
         'discount_factor': params["gamma"],
         'depot_id': params['depot_position_id'],
         # 'initial_cell': params['initial_cell_id'],
@@ -646,6 +657,7 @@ def main():
     params['minimum_number_of_bikes'] = args.min_num_bikes
     params['enable_repositioning'] = args.enable_repositioning
     params['use_net_flow'] = args.use_net_flow
+    params['critic_mode'] = args.critic_mode
     params['exploration_time'] = args.exploration_time
 
     print(f"Setting seed: {params['seed']}")
@@ -655,10 +667,11 @@ def main():
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"The specified data path does not exist: {data_path}")
 
-    # At X% of the total timeslots (X% of the training) the epsilon should be 0.1
+    # epsilon(t) = eps_min + (eps_max - eps_min) * exp(-t^2 / decay), with t in timeslots.
+    # With decay = T^2 / ln(10) and T = exploration_time * total timeslots, the exponential
+    # term equals 0.1 at t = T, i.e. epsilon ~= 0.109 after `exploration_time` of the training.
     params["epsilon_decay"] = ((params["exploration_time"] * params["num_episodes"] * params[
         "total_timeslots"]) ** 2) / np.log(10)
-    # TODO: check this above
 
     # ------------------------------------------------------------------
     # ResultsManager
@@ -733,7 +746,7 @@ def main():
     # ------------------------------------------------------------------
     # Training loop
     # ------------------------------------------------------------------
-    num_days = int(params["total_timeslots"] // 8)
+    num_days = params["total_timeslots"] / 8  # float: stays valid for episodes shorter than a day
 
     # Best validation score tracker (lower mean_daily_failures = better)
     best_val_score = float("inf")
@@ -805,7 +818,10 @@ def main():
             # Save training episode results
             results_manager.save_episode(training_results)
 
-            if agent.epsilon < params['validation_epsilon_threshold']:
+            if (
+                    not args.one_validation
+                    and agent.epsilon < params['validation_epsilon_threshold']
+            ):
 
                 # ── Step A: collect the previous val subprocess (if any) ──────
                 # This is the only point where training may briefly wait, and
@@ -863,6 +879,7 @@ def main():
                     total_timeslots=int(params['total_timeslots']),
                     enable_repositioning=bool(params['enable_repositioning']),
                     use_net_flow=bool(params['use_net_flow']),
+                    critic_mode=str(params['critic_mode']),
                 )
                 pending_val = _launch_validation_subprocess(val_cmd, episode, logger)
 
@@ -875,6 +892,34 @@ def main():
             )
 
             gc.collect()
+
+        # ------------------------------------------------------------------
+        # --one-validation: validate only the final model
+        # ------------------------------------------------------------------
+        if args.one_validation:
+            last_episode = int(params["num_episodes"]) - 1
+            results_manager.save_model(
+                agent=agent,
+                episode=last_episode,
+                score=training_results.mean_daily_failures,
+                model_type='episode'
+            )
+            logger.info(f"Episode {last_episode}: final model snapshot saved for single validation")
+            val_cmd = _build_validate_cmd(
+                run_id=run_id,
+                data_path=data_path,
+                results_path=results_path,
+                episode=last_episode,
+                val_device=str(val_device),
+                seed=int(params['seed']),
+                max_num_bikes=int(params['maximum_number_of_bikes']),
+                min_num_bikes=int(params['minimum_number_of_bikes']),
+                total_timeslots=int(params['total_timeslots']),
+                enable_repositioning=bool(params['enable_repositioning']),
+                use_net_flow=bool(params['use_net_flow']),
+                critic_mode=str(params['critic_mode']),
+            )
+            pending_val = _launch_validation_subprocess(val_cmd, last_episode, logger)
 
         # ------------------------------------------------------------------
         # End of training — collect any still-running validation

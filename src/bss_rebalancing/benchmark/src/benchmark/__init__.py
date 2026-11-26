@@ -15,7 +15,7 @@ from .utils import (
 from .logging_config import LoggingConfig, init_logging, get_logger
 from .results_manager import EpisodeResults, ResultsManager
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 __all__ = [
     # Main functions
@@ -23,7 +23,7 @@ __all__ = [
     "run_benchmark",
     "run_simulation",
     # Utilities
-    "set_seed"
+    "set_seed",
     "build_cell_graph_from_cells",
     "update_cell_graph_features",
     "convert_seconds_to_hours_minutes",

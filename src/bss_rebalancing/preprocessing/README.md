@@ -30,18 +30,20 @@ pip install -e src/bss_rebalancing/preprocessing
 Download and preprocess all data in one command:
 
 ```bash
-bss-preprocess --data-path data/
+bss-preprocess --data-path data/ --source bluebikes
 ```
 
 This will execute all preprocessing steps:
-1. Download BlueBikes trip data
-2. Compute Poisson request rates per station pair
-3. Interpolate sparse data using PMF matrices
-4. Create spatial grid (300m cells)
-5. Build distance matrices with TomTom traffic
-6. Compute global rate statistics
-7. Generate nodes dictionary for fast lookups
-8. Create electric vehicle (EV) consumption matrices
+1. `download`: download and clean the trip data of the chosen source (`sources.json`)
+2. `preprocess`: compute Poisson request rates per station pair, day and time slot (and the global rates)
+3. `interpolate`: interpolate the sparse rates into PMF matrices
+4. `grid`: create the spatial grid (default 300 m cells)
+5. `distance`: build the node-to-node distance matrix
+6. `nodes`: generate the nearby-nodes dictionary for fast lookups
+7. `ev_matrices`: create the truck velocity / consumption tables
+
+When all steps complete, a `utils/preprocessing_manifest.json` is written (source definition, hash of `sources.json`,
+configuration, package versions and the command to reproduce the run).
 
 ---
 
@@ -50,35 +52,62 @@ This will execute all preprocessing steps:
 ### Main Command
 
 ```bash
-bss-preprocess [OPTIONS]
+bss-preprocess --source SOURCE [OPTIONS]
 ```
 
 ### Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
+| `--source` | str | **required** | Source id from `sources.json` (`bluebikes`, `citibike`, ...) |
+| `--sources-json` | str | bundled `core/sources.json` | Custom sources file |
 | `--data-path` | str | `data/` | Path to data directory |
-| `--year` | int | `2022` | Year of data to process |
-| `--months` | str | `9,10` | Comma-separated months |
-| `--cell-size` | int | `300` | Grid cell size in meters |
 | `--steps` | str | all | Specific steps to run (comma-separated) |
 | `--skip` | str | none | Steps to skip (comma-separated) |
-| `--plot` | str | none | Plot mode: `graph`, `grid`, `grid-numbered` |
-| `--bbox` | str | `[42.370, 42.353, -71.070, -71.117]` | Bounding box [N,S,E,W] |
-| `--verbose` / `-v` | flag | false | Enable verbose output |
+| `--plot` | str | none | Plot mode: `graph`, `grid`, `grid-numbered` (skips preprocessing) |
+| `--cell-size` | int | from source | Grid cell size in meters; overrides the source's `cell_size` (300 for the bundled sources) |
+| `--verbose` / `-v` | flag | false | Print tracebacks on errors |
 
 ### Pipeline Steps
 
-Available steps for `--steps` or `--skip`:
+Available steps for `--steps` or `--skip`, in execution order:
 
-1. **`download`** - Download BlueBikes trip data
-2. **`preprocess`** - Compute Poisson rates ⚠️ *slow*
+1. **`download`** - Download and clean the trip data
+2. **`preprocess`** - Compute Poisson rates and global rates ⚠️ *slow*
 3. **`interpolate`** - Build PMF matrices
 4. **`grid`** - Create spatial grid cells
 5. **`distance`** - Build distance matrix
-6. **`rates`** - Compute global statistics
-7. **`nodes`** - Create nodes dictionary
-8. **`ev_matrices`** - Generate EV matrices
+6. **`nodes`** - Create nearby-nodes dictionary
+7. **`ev_matrices`** - Generate EV matrices
+
+---
+
+## Data Sources (`sources.json`)
+
+Everything that is specific to a bike-share feed lives in `src/preprocessing/core/sources.json`, one entry per source.
+Adding a feed does not require code changes:
+
+```json
+"citibike": {
+  "base_url": "https://s3.amazonaws.com/tripdata/",
+  "url_prefix": "", "url_suffix": "-citibike-tripdata.zip",     // <year><month><suffix>
+  "graph_place": "Manhattan, New York, USA",
+  "network_type": "bike",
+  "bbox": [40.7620, 40.7474, -73.9741, -73.993],                // north, south, east, west
+  "years": [2024], "months": [9, 10],
+  "station_id_type": "alphanumeric",                            // or "numeric"
+  "multi_csv_per_zip": true,
+  "column_map": {"started_at": "starttime", "ended_at": "stoptime", ...},  // raw column -> canonical column
+  "vital_columns": ["starttime", "stoptime", "start station id", ...],
+  "cell_size": 300
+}
+```
+
+The `download` step downloads the monthly ZIPs, and `core/converter.py` concatenates the raw CSVs, renames columns
+through `column_map`, parses the timestamps (many formats), encodes station ids to integers (numeric ids are scaled
+by 100, alphanumeric ones are encoded from letters + digits) and writes one clean CSV.
+
+To use a different feed, pass `--sources-json my_sources.json --source my_feed`.
 
 ---
 
@@ -87,40 +116,43 @@ Available steps for `--steps` or `--skip`:
 ### Basic Usage
 
 ```bash
-# Full pipeline with defaults
-bss-preprocess --data-path data/
+# Full pipeline for a source
+bss-preprocess --data-path data/ --source bluebikes
 
-# Process specific year and months
-bss-preprocess --data-path data/ --year 2022 --months 9,10,11
+# Another source
+bss-preprocess --data-path data/ --source citibike
 
 # Custom cell size
-bss-preprocess --data-path data/ --cell-size 500
+bss-preprocess --data-path data/ --source bluebikes --cell-size 500
+
+# Custom year / months / bounding box: edit (a copy of) sources.json
+bss-preprocess --data-path data/ --source bluebikes --sources-json my_sources.json
 ```
 
 ### Selective Processing
 
 ```bash
 # Run only specific steps
-bss-preprocess --data-path data/ --steps download,preprocess,grid
+bss-preprocess --data-path data/ --source bluebikes --steps download,preprocess,grid
 
 # Skip time-consuming preprocessing
-bss-preprocess --data-path data/ --skip preprocess
+bss-preprocess --data-path data/ --source bluebikes --skip preprocess
 
 # Skip download if data already exists
-bss-preprocess --data-path data/ --skip download
+bss-preprocess --data-path data/ --source bluebikes --skip download
 ```
 
 ### Visualization
 
 ```bash
 # Plot base graph only
-bss-preprocess --data-path data/ --plot graph
+bss-preprocess --data-path data/ --source bluebikes --plot graph
 
 # Plot with grid overlay
-bss-preprocess --data-path data/ --plot grid
+bss-preprocess --data-path data/ --source bluebikes --plot grid
 
 # Plot with grid and cell IDs
-bss-preprocess --data-path data/ --plot grid-numbered
+bss-preprocess --data-path data/ --source bluebikes --plot grid-numbered
 ```
 
 Plots are saved to `data/plots/`.
@@ -128,21 +160,12 @@ Plots are saved to `data/plots/`.
 ### Advanced Configuration
 
 ```bash
-# Custom bounding box (Cambridge area)
-bss-preprocess \
-    --data-path data/ \
-    --bbox "[42.400, 42.350, -71.050, -71.150]" \
-    --cell-size 400
-
 # Verbose output for debugging
-bss-preprocess --data-path data/ --verbose
-
-# Process entire year
-bss-preprocess \
-    --data-path data/ \
-    --year 2022 \
-    --months 1,2,3,4,5,6,7,8,9,10,11,12
+bss-preprocess --data-path data/ --source bluebikes --verbose
 ```
+
+Process a different period, another area or a larger cell size by editing the corresponding entry of `sources.json`
+(`years`, `months`, `bbox`, `graph_place`, `cell_size`).
 
 ---
 
@@ -152,44 +175,47 @@ After running the pipeline, your data directory will contain:
 
 ```
 data/
-├── trips/                                  # Downloaded trip data
-│   ├── 202209-bluebikes-tripdata.csv
-│   └── 202210-bluebikes-tripdata.csv
+├── trips/                                  # Downloaded ZIPs + one cleaned CSV
+│   ├── 202209-bluebikes-tripdata.zip
+│   ├── 202210-bluebikes-tripdata.zip
+│   └── bluebikes-09-10-tripdata.csv
 │
-├── rates/                                  # Poisson rate matrices
+├── rates/                                  # Poisson rates
 │   └── 09-10/                              # Month range
-│       ├── 00/                             # Timeslot 0 (01:00-04:00)
-│       │   ├── monday-poisson-rates.csv
-│       │   ├── tuesday-poisson-rates.csv
-│       │   └── ...
-│       ├── 01/                             # Timeslot 1 (04:00-07:00)
-│       └── ...                             # Timeslots 2-7
+│       ├── monday/
+│       │   ├── 00-extracted-rates.csv      # Timeslot 0 (01:00-04:00)
+│       │   └── ...                         # Timeslots 01-07
+│       └── ...                             # tuesday ... sunday
 │
-├── matrices/                               # Rate matrices
+├── matrices/                               # PMF matrices (used by the environments)
 │   └── 09-10/
-│       ├── 00/
-│       │   ├── monday-rate-matrix.csv
+│       ├── monday/
+│       │   ├── 00-pmf-matrix.csv
 │       │   └── ...
 │       └── ...
 │
 ├── utils/                                  # Processed utilities
-│   ├── network.graphml           # Street network graph
+│   ├── network.graphml                     # Street network graph
 │   ├── cell_data.pkl                       # Spatial grid cells
-│   ├── distance_matrix.csv                 # Travel time matrix
-│   ├── ev_consumption_matrix.csv           # Travel time matrix
-│   ├── ev_velocity_matrix.csv              # Travel time matrix
-│   ├── global_rates.pkl                    # Global statistics
+│   ├── distance_matrix.csv                 # Node-to-node distances
+│   ├── ev_consumption_matrix.csv
+│   ├── ev_velocity_matrix.csv
+│   ├── global_rates.pkl                    # Global rate per (day, timeslot)
 │   ├── nearby_nodes.pkl                    # Node neighborhood data
+│   └── preprocessing_manifest.json         # Reproducibility manifest
 │
-└── plots/                                  # Visualizations
+└── plots/                                  # Visualizations (--plot)
     ├── graph.png
     ├── grid.png
     └── grid_numbered.png
 ```
 
+Note: the environments currently look for `matrices/09-10` (see `gymnasium_env/simulator/utils.py`), so months other than
+`[9, 10]` require updating that path.
+
 ---
 
-## Data Sources
+## Upstream Data
 
 ### BlueBikes Trip Data
 - **Source**: [BlueBikes System Data](https://www.bluebikes.com/system-data)
@@ -211,32 +237,23 @@ data/
 
 ## Configuration
 
-Default configuration in `config.py`:
+Run-level settings live in `PreprocessingConfig` (`config.py`); source-specific ones (place, bbox, period, columns,
+cell size) live in `sources.json`.
 
 ```python
 @dataclass
 class PreprocessingConfig:
-    # Location
-    place = ["Cambridge, Massachusetts, USA"]
+    source_id = "bluebikes"
+    sources_json = <bundled core/sources.json>
     network_type = "bike"
-    bbox = (42.370, 42.353, -71.070, -71.117)  # N, S, E, W
-
-    # Time
-    year = 2022
-    months = [9, 10]  # September, October
-    days_of_week = ["Monday", ..., "Sunday"]
-    num_time_slots = 8  # 3-hour slots
-
-    # Grid
-    cell_size = 300  # meters
-    interpolation_radius = 500  # meters
-    user_radius = 250  # meters
-
-    # Paths
     data_path = "data/"
+    nodes_to_remove = []              # graph nodes to drop
+    days_of_week = ["Monday", ..., "Sunday"]
+    num_time_slots = 8                # 3-hour slots
+    cell_size = 300                   # meters (from the source unless --cell-size is given)
+    interpolation_radius = 500        # meters, PMF interpolation
+    user_radius = 250                 # meters, nearby nodes
 ```
-
-Customize via CLI arguments or by modifying `config.py`.
 
 ---
 
@@ -255,21 +272,24 @@ preprocessing/
         │
         ├── core/            # Core utilities
         │   ├── __init__.py
-        │   ├── graph.py     # Network graph operations
-        │   ├── grid.py      # Spatial grid operations
-        │   ├── plotting.py  # Visualization functions
-        │   └── utils.py     # Helper functions
+        │   ├── sources.json    # Data-source registry
+        │   ├── sources.py      # Source dataclass + loader
+        │   ├── converter.py    # Raw trip CSV -> clean CSV (columns, timestamps, station ids)
+        │   ├── manifest.py     # Reproducibility manifest
+        │   ├── graph.py        # Network graph operations
+        │   ├── grid.py         # Spatial grid operations
+        │   ├── plotting.py     # Visualization functions
+        │   └── utils.py        # Helper functions
         │
         └── steps/           # Pipeline steps
             ├── __init__.py
-            ├── download_trips.py              # Step 1
-            ├── preprocess_data.py             # Step 2
-            ├── interpolate_data.py            # Step 3
-            ├── preprocess_truck_grid.py       # Step 4
-            ├── preprocess_distance_matrix.py  # Step 5
-            ├── preprocess_global_rates.py     # Step 6
-            ├── preprocess_nodes_dictionary.py # Step 7
-            └── create_ev_matrices.py          # Step 8
+            ├── download_trips.py              # download
+            ├── preprocess_data.py             # preprocess (rates + global rates)
+            ├── interpolate_data.py            # interpolate (PMF matrices)
+            ├── preprocess_truck_grid.py       # grid
+            ├── preprocess_distance_matrix.py  # distance
+            ├── preprocess_nodes_dictionary.py # nodes
+            └── create_ev_matrices.py          # ev_matrices
 ```
 
 ---
@@ -289,27 +309,26 @@ pip install osmnx networkx geopandas matplotlib
 The `preprocess` step can be memory-intensive. If it fails:
 
 ```bash
-# Process fewer months at a time
-bss-preprocess --data-path data/ --months 9
+# Process fewer months at a time: set "months" in sources.json
 
-# Or reduce cell size to create fewer cells
-bss-preprocess --data-path data/ --cell-size 500
+# Or use larger cells to create fewer of them
+bss-preprocess --data-path data/ --source bluebikes --cell-size 500
 ```
 
 ### Download Failures
 
 If BlueBikes data download fails:
 
-1. Verify month/year exists in `https://s3.amazonaws.com/hubway-data/`
-2. Try downloading manually and place in `data/trips/`
+1. Verify that the month/year exists under the source's `base_url` (`sources.json`)
+2. Try downloading manually and place the ZIPs in `data/trips/`, then re-run with `--steps download` (existing ZIPs are reused)
 
 ### Graph Building Errors
 
 If graph initialization fails:
 
 ```bash
-# Try with a larger bounding box
-bss-preprocess --data-path data/ --bbox "[42.400, 42.300, -71.000, -71.200]"
+# Try a larger "bbox" for the source in sources.json, then re-run the pipeline
+bss-preprocess --data-path data/ --source bluebikes
 ```
 
 ---

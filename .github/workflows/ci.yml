@@ -1,0 +1,79 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+          cache-dependency-path: "**/pyproject.toml"
+
+      - name: Install CPU-only PyTorch
+        run: pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0
+
+      - name: Install packages
+        run: |
+          pip install \
+            -e src/bss_rebalancing/gymnasium_env \
+            -e src/bss_rebalancing/rl_training \
+            -e src/bss_rebalancing/preprocessing \
+            -e src/bss_rebalancing/benchmark \
+            -e src/bss_rebalancing/results_webapp \
+            -e src/bss_rebalancing/scenario \
+            -e "src/bss_rebalancing/sim[logs]" \
+            pytest
+
+      - name: Run tests
+        run: pytest -q
+
+  bench:
+    # Simulator performance budget (docs/sim-v2/SPEC.md §12) on a synthetic Cambridge-size bundle:
+    # CI has no real data. Free-threaded 3.14t also reports parallel simulators in threads.
+    name: Benchmark (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.14", "3.14t"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install bss-sim (NumPy only)
+        run: pip install -e src/bss_rebalancing/sim
+
+      - name: Build the synthetic bundle
+        run: python -m bss_sim.bench --make-synthetic "$RUNNER_TEMP/synth"
+
+      - name: Run the benchmarks (fails over budget)
+        run: python -m bss_sim.bench "$RUNNER_TEMP/synth" --check --json "bench-${{ matrix.python }}.json"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bench-${{ matrix.python }}
+          path: bench-${{ matrix.python }}.json

@@ -19,6 +19,8 @@ import numpy as np
 import osmnx as ox
 import polars as pl
 
+from scipy.stats import truncnorm
+
 from collections import deque
 from dataclasses import dataclass, field
 from multiprocessing.process import BaseProcess
@@ -102,6 +104,14 @@ class EnvDefaults:
 
     # Other parameters
     USE_BINARY_CRITIC = True
+
+    # How the critic score anticipates future demand:
+    #   "poisson": forecast sampled from the per-slot Poisson rates, independent of the
+    #              trips the simulator will actually generate (no look-ahead)
+    #   "oracle":  reads the realised future trips from the simulator's event buffer
+    CRITIC_MODE = "poisson"
+    CRITIC_MODES = ("poisson", "oracle")
+    FORECAST_STREAM = 0xF0CA57  # extra entropy so the forecast RNG is independent of trip sampling
 
 
 class BorderType:
@@ -349,6 +359,19 @@ class FullyDynamicEnv(gym.Env):
         # Event buffers
         self._event_buffer = None
 
+        # Demand forecast used by the critic score (critic_mode="poisson"):
+        # per cell, sorted arrays of future event times (s, relative to the current slot start)
+        # and deltas (+1 departure, -1 arrival).
+        self._critic_mode = EnvDefaults.CRITIC_MODE
+        self._cell_order = list(self._cells.keys())
+        self._forecast_times: list[np.ndarray] | None = None
+        self._forecast_deltas: list[np.ndarray] | None = None
+        self._forecast_valid_from: list[np.ndarray] | None = None
+        # Trips already on the road are known: arrival times per cell (relative to slot start)
+        self._inflight_arrivals: list[list[float]] = [[] for _ in self._cell_order]
+        self._cell_index = {c: i for i, c in enumerate(self._cell_order)}
+        self._slot_rate_cache: dict[tuple[str, int], dict] = {}
+
         # -------------------------------------------------------------------------
         # Initialize simulation counters
         # -------------------------------------------------------------------------
@@ -401,6 +424,8 @@ class FullyDynamicEnv(gym.Env):
                 - max_truck_load (int): Truck capacity
                 - discount_factor (float): RL discount factor
                 - reward_params (dict): Custom reward parameters
+                - critic_mode (str): "poisson" (default, forecast sampled from the
+                  demand rates) or "oracle" (reads the realised future trips)
 
         Returns:
             Tuple of (initial_observation, info_dict)
@@ -470,6 +495,11 @@ class FullyDynamicEnv(gym.Env):
         self._use_binary_critic = options.get(
             "use_binary_critic", EnvDefaults.USE_BINARY_CRITIC
         )
+        self._critic_mode = options.get("critic_mode", EnvDefaults.CRITIC_MODE)
+        if self._critic_mode not in EnvDefaults.CRITIC_MODES:
+            raise ValueError(
+                f"critic_mode must be one of {EnvDefaults.CRITIC_MODES}, got {self._critic_mode!r}"
+            )
 
         # Reset all cells
         for cell in self._cells.values():
@@ -512,6 +542,10 @@ class FullyDynamicEnv(gym.Env):
 
         # Clear event buffers
         self._event_buffer = None
+        self._forecast_times = None
+        self._forecast_deltas = None
+        self._forecast_valid_from = None
+        self._inflight_arrivals = [[] for _ in self._cell_order]
 
         # -------------------------------------------------------------------------
         # Initialize truck
@@ -923,6 +957,7 @@ class FullyDynamicEnv(gym.Env):
         """Apply seed to all RNG sources owned by this environment."""
         self._episode_seed = seed
         self.np_random, _ = seeding.np_random(seed)
+        self._forecast_rng = np.random.default_rng([seed, EnvDefaults.FORECAST_STREAM])
         self.action_space.seed(seed)
         self.observation_space.seed(seed)
 
@@ -981,22 +1016,11 @@ class FullyDynamicEnv(gym.Env):
                 heapq.merge(self._event_buffer, next_events, key=lambda e: e.time)
             )
 
-        # --- PMF / rate update (unchanged from your draft) ---
-        pmf_matrix = self._load_pmf_matrix(self._day, self._timeslot)
-        global_rate = self._global_rate_dict[(self._day.lower(), self._timeslot)]
-
-        pmf_lookup = {row["node_id"]: row for row in pmf_matrix.iter_rows(named=True)}
-
+        # --- Demand/arrival rates of the current slot (stations and cells) ---
+        station_dep, station_arr = self._slot_station_rates(self._day, self._timeslot)
         for stn_id, stn in self._stations.items():
-            row_data = pmf_lookup[stn_id]
-            row_sum = sum(v for k, v in row_data.items() if k != "node_id")
-            stn.set_request_rate(row_sum * global_rate)
-            col_sum = sum(
-                pmf_lookup[orig][str(stn_id)]
-                for orig in pmf_lookup
-                if str(stn_id) in pmf_lookup[orig]
-            )
-            stn.set_arrival_rate(col_sum * global_rate)
+            stn.set_request_rate(station_dep[stn_id])
+            stn.set_arrival_rate(station_arr.get(stn_id, 0.0))
 
         for cell in self._cells.values():
             nodes = cell.get_nodes()
@@ -1007,8 +1031,147 @@ class FullyDynamicEnv(gym.Env):
                 sum(self._stations[n].get_arrival_rate() for n in nodes)
             )
 
+        # --- Demand forecast for the critic score ---
+        if self._critic_mode == "poisson":
+            self._advance_forecast(next_slot_index)
+
         # Reset environment clock
         self._env_time = 0
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # Demand rates and forecast (critic score)
+    # ─────────────────────────────────────────────────────────────────────────
+
+    def _slot_station_rates(
+        self, day: str, timeslot: int
+    ) -> tuple[dict[int, float], dict[int, float]]:
+        """Per-station request and arrival rates (trips/s) of a (day, timeslot); cached."""
+        key = (day.lower(), timeslot)
+        entry = self._slot_rate_cache.get(key)
+        if entry is None:
+            pmf = self._load_pmf_matrix(day, timeslot)
+            global_rate = self._global_rate_dict[key]
+            values = pmf.drop("node_id")
+            dep = dict(
+                zip(
+                    pmf["node_id"].to_list(),
+                    (values.sum_horizontal() * global_rate).to_list(),
+                )
+            )
+            arr = {
+                int(col): total * global_rate
+                for col, total in zip(values.columns, values.sum().row(0))
+            }
+            entry = {"station": (dep, arr)}
+            self._slot_rate_cache[key] = entry
+        return entry["station"]
+
+    def _slot_cell_rates(self, day: str, timeslot: int) -> tuple[np.ndarray, np.ndarray]:
+        """Per-cell (departure, arrival) rates in trips/s, ordered as self._cell_order; cached."""
+        self._slot_station_rates(day, timeslot)
+        entry = self._slot_rate_cache[(day.lower(), timeslot)]
+        if "cell" not in entry:
+            dep, arr = entry["station"]
+            entry["cell"] = (
+                np.array(
+                    [sum(dep[n] for n in self._cells[c].get_nodes()) for c in self._cell_order]
+                ),
+                np.array(
+                    [sum(arr.get(n, 0.0) for n in self._cells[c].get_nodes()) for c in self._cell_order]
+                ),
+            )
+        return entry["cell"]
+
+    def _sample_forecast_slot(
+        self, day: str, timeslot: int, offset: float
+    ) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+        """
+        Sample the trips of one slot from the demand model, the same way the simulator does
+        (Poisson number of trips, origin/destination from the PMF, travel time from distance and
+        a truncated-Gaussian speed), but with an independent RNG: it is NOT the set of trips the
+        simulator will actually generate.
+
+        Returns, per cell (self._cell_order), arrays (times, deltas, valid_from): a departure is
+        +1 at its time, the matching arrival -1 at departure + travel time. `valid_from` is the
+        departure time of the trip: an arrival is only part of the forecast while its departure
+        is still in the future (afterwards the trip is either known to be in flight or failed).
+        """
+        duration = EnvDefaults.TIMESLOT_DURATION_SECONDS
+        rng = self._forecast_rng
+        pmf = self._load_pmf_matrix(day, timeslot)
+        global_rate = self._global_rate_dict[(day.lower(), timeslot)]
+        row_ids = pmf["node_id"].to_numpy()
+        col_ids = np.array([int(c) for c in pmf.columns[1:]])
+        cumulative = np.cumsum(pmf.drop("node_id").to_numpy().ravel())
+
+        n_trips = rng.poisson(global_rate * duration)
+        dep_times = offset + np.floor(rng.uniform(0.0, duration, size=n_trips))
+        picks = np.minimum(np.searchsorted(cumulative, rng.random(n_trips)), len(cumulative) - 1)
+        origins = row_ids[picks // len(col_ids)]
+        destinations = col_ids[picks % len(col_ids)]
+
+        external = (origins == 10000) | (destinations == 10000)
+        distances = np.zeros(n_trips)
+        for k in np.flatnonzero(~external):
+            distances[k] = int(self._distance_lookup[int(origins[k])][str(int(destinations[k]))])
+        speeds = truncnorm.rvs(-2.0, 2.0, loc=15, scale=5, size=n_trips, random_state=rng)  # 5-25 km/h
+        travel = np.where(external, 1, np.floor(distances * 3.6 / speeds))
+
+        per_cell: list[list[tuple[float, int, float]]] = [[] for _ in self._cell_order]
+        for k in range(n_trips):
+            o, d = int(origins[k]), int(destinations[k])
+            if o != 10000:
+                per_cell[self._cell_index[self._stations[o].get_cell().get_id()]].append(
+                    (dep_times[k], 1, dep_times[k])
+                )
+            if d != 10000:
+                per_cell[self._cell_index[self._stations[d].get_cell().get_id()]].append(
+                    (dep_times[k] + travel[k], -1, dep_times[k])
+                )
+
+        samples = []
+        for events in per_cell:
+            if events:
+                arr = np.array(events, dtype=float)
+                samples.append((arr[:, 0], arr[:, 1].astype(np.int8), arr[:, 2]))
+            else:
+                samples.append((np.empty(0), np.empty(0, dtype=np.int8), np.empty(0)))
+        return samples
+
+    def _extend_forecast(self, samples: list[tuple[np.ndarray, np.ndarray, np.ndarray]]) -> None:
+        for i, (times, deltas, valid_from) in enumerate(samples):
+            merged_t = np.concatenate([self._forecast_times[i], times])
+            merged_d = np.concatenate([self._forecast_deltas[i], deltas])
+            merged_v = np.concatenate([self._forecast_valid_from[i], valid_from])
+            order = np.argsort(merged_t, kind="stable")
+            self._forecast_times[i] = merged_t[order]
+            self._forecast_deltas[i] = merged_d[order]
+            self._forecast_valid_from[i] = merged_v[order]
+
+    def _advance_forecast(self, next_slot_index: int) -> None:
+        """
+        Keep the forecast window aligned with the event buffer: [current slot, next slot].
+        At a slot change the already drawn scenario of the upcoming slot becomes the
+        current one and only the new "next" slot is sampled.
+        """
+        duration = EnvDefaults.TIMESLOT_DURATION_SECONDS
+        next_day = NUM_TO_DAYS[next_slot_index // EnvDefaults.TIMESLOTS_PER_DAY]
+        next_timeslot = next_slot_index % EnvDefaults.TIMESLOTS_PER_DAY
+
+        if self._forecast_times is None:
+            self._forecast_times = [np.empty(0) for _ in self._cell_order]
+            self._forecast_deltas = [np.empty(0, dtype=np.int8) for _ in self._cell_order]
+            self._forecast_valid_from = [np.empty(0) for _ in self._cell_order]
+            self._extend_forecast(self._sample_forecast_slot(self._day, self._timeslot, 0.0))
+        else:
+            for i in range(len(self._cell_order)):
+                times = self._forecast_times[i] - duration
+                keep = times >= 0.0
+                self._forecast_times[i] = times[keep]
+                self._forecast_deltas[i] = self._forecast_deltas[i][keep]
+                self._forecast_valid_from[i] = self._forecast_valid_from[i][keep] - duration
+                self._inflight_arrivals[i] = [t - duration for t in self._inflight_arrivals[i] if t - duration >= 0.0]
+        self._extend_forecast(self._sample_forecast_slot(next_day, next_timeslot, duration))
 
     def _load_pmf_matrix(self, day: str, timeslot: int) -> pl.DataFrame:
         """Load the PMF matrix and global rate for a given day and timeslot."""
@@ -1077,6 +1240,15 @@ class FullyDynamicEnv(gym.Env):
                 truck_load=self._truck.get_load(),
             )
             total_step_failures += failure
+
+            # Known information: a trip that just left is on the road until its (known) arrival
+            if self._critic_mode == "poisson" and event.is_departure():
+                trip = event.get_trip()
+                end = trip.get_end_location()
+                if not trip.is_failed() and end.get_station_id() != 10000:
+                    self._inflight_arrivals[self._cell_index[end.get_cell().get_id()]].append(
+                        event.time + (trip.get_end_time() - trip.get_start_time())
+                    )
 
         return total_step_failures
 
@@ -1391,10 +1563,12 @@ class FullyDynamicEnv(gym.Env):
     # Graph Update
     # ─────────────────────────────────────────────────────────────────────────
 
-    def _update_cells_metrics(self):
-        """Update the cell subgraph with current regional metrics."""
-
-        # ── Recompute expected departures from remaining buffer (old-env style) ──
+    def _flows_from_event_buffer(self) -> tuple[dict[int, int], dict[int, int]]:
+        """
+        ORACLE: expected flows read from the realised future trips in the event buffer.
+        Returns ({cell: peak net outflow}, {cell: arrivals after that peak}) for the next
+        TIMESLOT_DURATION_SECONDS.
+        """
         expected_departures: dict[int, int] = {}
         expected_max_departure: dict[int, int] = {}
         expected_after_arrival: dict[int, int] = {}
@@ -1437,6 +1611,53 @@ class FullyDynamicEnv(gym.Env):
                     expected_max_departure[cell_id] - expected_departures[cell_id]
                 )
 
+        return expected_max_departure, expected_after_arrival
+
+    def _flows_from_forecast(self) -> tuple[dict[int, int], dict[int, int]]:
+        """
+        Same quantities as the oracle, computed without looking at the simulator's future trips.
+        Per cell, over the window [env_time, env_time + slot duration], the running net outflow
+        (departures - arrivals) is built from
+          - the arrivals of trips already on the road (known), and
+          - the forecast trips that have not departed yet (their departures and arrivals);
+        then its peak (>= 0) and the arrivals after that peak are returned.
+        """
+        window_start = self._env_time
+        window_end = window_start + EnvDefaults.TIMESLOT_DURATION_SECONDS
+        expected_max_departure: dict[int, int] = {}
+        expected_after_arrival: dict[int, int] = {}
+
+        for i, cell_id in enumerate(self._cell_order):
+            times = self._forecast_times[i]
+            lo = np.searchsorted(times, window_start, side="left")
+            hi = np.searchsorted(times, window_end, side="right")
+            seg_t = times[lo:hi]
+            seg_d = self._forecast_deltas[i][lo:hi]
+            future = self._forecast_valid_from[i][lo:hi] >= window_start
+            seg_t, seg_d = seg_t[future], seg_d[future]
+
+            known = [t for t in self._inflight_arrivals[i] if window_start <= t <= window_end]
+            if known:
+                seg_t = np.concatenate([seg_t, known])
+                seg_d = np.concatenate([seg_d, -np.ones(len(known), dtype=np.int8)])
+                seg_d = seg_d[np.argsort(seg_t, kind="stable")]
+            if seg_d.size == 0:
+                continue
+            net = np.cumsum(seg_d, dtype=np.int64)
+            peak = max(0, int(net.max()))
+            expected_max_departure[cell_id] = peak
+            expected_after_arrival[cell_id] = peak - int(net[-1])
+
+        return expected_max_departure, expected_after_arrival
+
+    def _update_cells_metrics(self):
+        """Update the cell subgraph with current regional metrics."""
+
+        if self._critic_mode == "oracle":
+            expected_max_departure, expected_after_arrival = self._flows_from_event_buffer()
+        else:
+            expected_max_departure, expected_after_arrival = self._flows_from_forecast()
+
         # ── Update each cell ──────────────────────────────────────────────────────
         self._global_critic_score = 0
         for cell_id, cell in self._cells.items():
@@ -1454,10 +1675,17 @@ class FullyDynamicEnv(gym.Env):
             raw_critic = cell.get_critic_score()
 
             if self._use_binary_critic:
-                # Binary classification: critic = 1 if “bad”, else 0
+                # Binary classification: critic = 1 if “bad”, else keep raw score.
+                # Use set_metric (not set_critic_score) so the previous-step value
+                # snapshot in 'old_critic_score' is not overwritten a second time
+                # within the same update. The binary critic threshold (> 0.0) is
+                # looser than Cell's own (> 0.05), so flag/surplus are forced here
+                # to match what set_critic_score(1.0) used to do.
                 is_critical = raw_critic > 0.0
-                cell.set_critic_score(1.0 if is_critical else raw_critic)
                 if is_critical:
+                    cell.set_metric("critic_score", 1.0)
+                    cell.set_is_critical(True)
+                    cell.set_metric("surplus_bikes", 0)
                     self._global_critic_score += 1.0
             else:
                 self._global_critic_score += max(raw_critic, 0.0)

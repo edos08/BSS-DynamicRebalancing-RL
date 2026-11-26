@@ -42,10 +42,10 @@ bss-benchmark \
     --data-path data/ \
     --results-path results/ \
     --run-id 0 \
-    --num-episodes 1 \
-    --total-timeslots 56 \
-    --maximum-number-of-bikes 300 \
-    --fixed-rebal-bikes-per-cell 5
+    --num-seed-runs 5 \
+    --max-num-bikes 300 \
+    --num-rebal-events 2 \
+    --start-rebal-hour 1
 ```
 
 ### Python API
@@ -53,17 +53,20 @@ bss-benchmark \
 ```python
 from benchmark import run_benchmark
 
-config = {
-    'data_path': 'data/',
-    'results_path': './results',
+run_benchmark({
     'run_id': 0,
-    'num_episodes': 1,
-    'total_timeslots': 56,
+    'data_path': 'data/',
+    'results_path': 'results/',
+    'seed': 42,
+    'num_seed_runs': 1,
+    'num_rebal_events': 2,
+    'start_rebal_hour': 1,
     'maximum_number_of_bikes': 300,
-    'fixed_rebal_bikes_per_cell': 5
-}
-
-run_benchmark(config)
+    'minimum_number_of_bikes': 1,
+    'enable_repositioning': False,
+    'use_net_flow': False,
+    'log': False,
+})
 ```
 
 ---
@@ -76,48 +79,54 @@ benchmark/
 ├── pyproject.toml
 └── src/
     └── benchmark/
-        ├── __init__.py       # Package initialization and exports
-        ├── run.py            # Main benchmark runner (CLI entry point)
-        └── utils.py          # Utility functions
+        ├── __init__.py          # Package initialization and exports
+        ├── run.py               # Main benchmark runner (CLI entry point)
+        ├── results_manager.py   # EpisodeResults / ResultsManager (same layout as rl_training)
+        ├── logging_config.py    # Logging setup
+        └── utils.py             # Cell-graph helpers, seeding
 ```
 
 ---
 
 ## CLI Arguments
 
-| Argument | Type | Default      | Description |
-|----------|------|--------------|-------------|
-| `--data-path` | str | `"data/"`    | Path to preprocessed data directory |
-| `--results-path` | str | `"results/"` | Path where results will be saved |
-| `--run-id` | int | `0`          | Unique identifier for this benchmark run |
-| `--num-episodes` | int | `1`          | Number of simulation episodes |
-| `--total-timeslots` | int | `56`         | Total timeslots per episode (8/day × 7 days) |
-| `--maximum-number-of-bikes` | int | `300`        | Total bike fleet size |
-| `--fixed-rebal-bikes-per-cell` | int | `5`          | Base bikes per cell after rebalancing |
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--run-id` | int | `0` | Unique identifier for this benchmark run |
+| `--data-path` | str | `"data/"` | Path to preprocessed data directory |
+| `--results-path` | str | `"results/"` | Root results directory (a `run_NNN/benchmark/` folder is created) |
+| `--max-num-bikes` | int | `500` | Total bike fleet size |
+| `--min-num-bikes` | int | `1` | Minimum bikes per cell |
+| `--num-rebal-events` | int | `2` | Rebalancing events per day |
+| `--start-rebal-hour` | int | `1` | Clock hour of the first rebalancing event (the others follow every `24 // num-rebal-events` hours) |
+| `--enable-repositioning` | flag | — | Distribute the bikes above the per-cell minimum at episode start |
+| `--use-net-flow` | flag | — | Bias that distribution by predicted net flow |
+| `--seed` | int | `42` | Random seed |
+| `--num-seed-runs` | int | `1` | Number of weekly episodes (seed, seed+1, ...) |
+| `--log` | flag | — | Enable detailed environment logging |
+
+The episode length is fixed to 56 timeslots (one week); the depot cell is `18` (`params["depot_position_id"]` in `run.py`).
 
 ---
 
 ## Configuration
 
-### Default Parameters
+Default `params` in `run.py`:
 
 ```python
-class BenchmarkDefaults:
-    # Simulation parameters
-    NUM_EPISODES = 1
-    TOTAL_TIMESLOTS = 56              # 1 week (8 timeslots/day × 7 days)
-
-    # Fleet parameters
-    MAXIMUM_BIKES = 300
-    BIKES_PER_CELL = 5                # Base allocation per cell
-
-    # Environment setup
-    DEPOT_ID = 103                    # Depot cell ID
-    INITIAL_CELL_ID = 103             # Starting cell ID
-    NUM_REBALANCING_EVENTS = 8        # Rebalancing ops per day
-
-    # Reproducibility
-    RANDOM_SEED = 32
+params = {
+    "seed": 42,
+    "num_episodes": 1,
+    "total_timeslots": 56,              # 1 week (8 timeslots/day x 7 days)
+    "num_rebalancing_events": 2,        # Rebalancing events per day
+    "starting_rebalancing_event": 1,    # Clock hour of the first event
+    "enable_repositioning": False,
+    "use_net_flow": False,
+    "maximum_number_of_bikes": 500,
+    "minimum_number_of_bikes": 1,
+    "depot_position_id": 18,            # Depot cell id
+    "initial_cell_id": 18,
+}
 ```
 
 ---
@@ -128,117 +137,88 @@ class BenchmarkDefaults:
 
 The benchmark uses the `StaticEnv` environment, which:
 
-1. **Distributes bikes** initially based on predicted net flow
-2. **Simulates trips** using Poisson-distributed demand
-3. **Performs periodic rebalancing** at scheduled intervals (e.g., every 12 hours)
-4. **Uses TSP optimization** to determine optimal rebalancing routes
-5. **Records metrics** including failures and rebalancing time
+1. **Distributes bikes** at the start of the episode (minimum per cell, optionally biased by predicted net flow)
+2. **Simulates trips** using the same Poisson trip generator as the RL environment
+3. **Rebalances at scheduled hours** (`num-rebal-events` per day, the first at `start-rebal-hour`)
+4. **Uses TSP** over the surplus / deficit cells to compute how long the rebalancing takes
+5. **Records metrics**, including failures and rebalancing time
 
 ### Rebalancing Strategy
 
-The TSP-based rebalancing:
-- Identifies **surplus cells** (excess bikes) and **deficit cells** (insufficient bikes)
-- Computes an **optimal route** using the Traveling Salesman Problem algorithm
-- **Picks up bikes** from surplus locations
-- **Drops bikes** at deficit locations
-- Returns to depot if truck capacity is reached
+At each scheduled hour:
+- A target distribution is computed (at least 1 bike per cell, the rest proportional to the predicted net outflow)
+- Surplus and deficit cells are identified; a TSP route over them gives the rebalancing duration
+- The redistribution is applied instantaneously (all bikes at stations and in the depot are re-placed), so the duration is
+  reported but not simulated as truck unavailability
 
 ### Metrics Collected
 
-**Per Timeslot**:
-- Number of trip failures (bike unavailable)
-- Rebalancing operation duration (seconds)
+**Per timeslot** (`timeslot_metrics.csv`): failures, demand, deployed / depot / truck / outside / traveling bikes,
+rebalancing durations (s), global critic score
 
-**Aggregated**:
-- Total failures across all episodes
-- Total rebalancing time
+**Per episode** (`scalars.json`, `bench_summary.csv`): `total_failures`, `mean_daily_failures`
+
+**Spatial** (`cell_subgraph.gpickle`): per-cell failures, failure rate, mean critic score, mean bikes
 
 ---
 
 ## Results Output
 
-Results are saved in a structured directory:
+Results use the same structure as the training runs, so the results web app can display them next to the RL results:
 
 ```
 results/
-└── benchmark/
-    └── run_0/
-        ├── total_failures.pkl       # List of failures per timeslot
-        └── rebalance_time.pkl       # List of rebalancing durations
+└── run_000/
+    └── benchmark/
+        ├── config.json              # Parameters used
+        ├── bench_summary.csv        # One row per episode
+        ├── logs/
+        └── episode_000/
+            ├── scalars.json
+            ├── timeslot_metrics.csv
+            └── cell_subgraph.gpickle
 ```
 
 ### Loading Results
 
 ```python
-import pickle
+import json
+import pandas as pd
 
-# Load failures
-with open('results/benchmark/run_0/total_failures.pkl', 'rb') as f:
-    failures = pickle.load(f)
+run = "results/run_000/benchmark"
+summary = pd.read_csv(f"{run}/bench_summary.csv")
+print(summary[["episode", "total_failures", "mean_daily_failures"]])
 
-# Load rebalancing times
-with open('results/benchmark/run_0/rebalance_time.pkl', 'rb') as f:
-    rebalance_times = pickle.load(f)
-
-print(f"Total failures: {sum(failures)}")
-print(f"Mean rebalancing time: {np.mean(rebalance_times):.2f} seconds")
+metrics = pd.read_csv(f"{run}/episode_000/timeslot_metrics.csv")
+print(metrics[["timeslot", "failures", "demand"]].head())
 ```
 
 ---
 
 ## Usage Examples
 
-### Single Episode Benchmark
-
-```bash
-bss-benchmark \
-    --data-path data/ \
-    --results-path results/ \
-    --run-id 1 \
-    --num-episodes 1 \
-    --maximum-number-of-bikes 300
-```
-
 ### Multi-Episode Benchmark
 
-In this example, we run 5 episodes, each lasting 2 weeks:
+Five weekly episodes with seeds 42..46:
+
 ```bash
-bss-benchmark \
-    --data-path data/ \
-    --results-path results/ \
-    --run-id 2 \
-    --num-episodes 5 \
-    --total-timeslots 112  # 2 weeks per episode (default is 1 week)
+bss-benchmark --data-path data/ --results-path results/ --run-id 2 --num-seed-runs 5
 ```
 
 ### Fleet Size Comparison
 
-Run benchmarks with different fleet sizes:
-
 ```bash
-# Small fleet
-bss-benchmark --run-id 10 --maximum-number-of-bikes 200
-
-# Medium fleet
-bss-benchmark --run-id 11 --maximum-number-of-bikes 300
-
-# Large fleet
-bss-benchmark --run-id 12 --maximum-number-of-bikes 500
+bss-benchmark --run-id 10 --max-num-bikes 200
+bss-benchmark --run-id 11 --max-num-bikes 300
+bss-benchmark --run-id 12 --max-num-bikes 500
 ```
 
 ### Rebalancing Frequency Study
 
-Vary bikes per cell:
-
 ```bash
-# Conservative (more bikes per cell)
-bss-benchmark --run-id 20 --fixed-rebal-bikes-per-cell 10
-
-# Moderate
-bss-benchmark --run-id 21 --fixed-rebal-bikes-per-cell 5
-
-# Aggressive (fewer bikes per cell)
-bss-benchmark --run-id 22 --fixed-rebal-bikes-per-cell 2
+bss-benchmark --run-id 20 --num-rebal-events 1
+bss-benchmark --run-id 21 --num-rebal-events 2
+bss-benchmark --run-id 22 --num-rebal-events 4 --start-rebal-hour 6
 ```
 
 ---
@@ -275,7 +255,7 @@ pip install -e .
 **Solution**: Ensure preprocessing pipeline has been run:
 ```bash
 cd preprocessing
-bss-preprocess --data-path /path/to/data --steps download preprocess grid
+bss-preprocess --data-path /path/to/data --source bluebikes
 ```
 
 ### Environment Not Found
@@ -298,9 +278,8 @@ pip install -e .
 - Dense spatial grid
 
 **Solutions**:
-- Reduce fleet size: `--maximum-number-of-bikes 200`
-- Reduce duration: `--total-timeslots 16` (2 days)
-- Reduce episodes: `--num-episodes 1`
+- Reduce fleet size: `--max-num-bikes 200`
+- Reduce the number of episodes: `--num-seed-runs 1`
 
 ---
 

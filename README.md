@@ -42,7 +42,7 @@ bss-rebalancing/
         │   ├── pyproject.toml
         │   └── src/preprocessing/
         │       ├── cli.py             # CLI entry point (bss-preprocess)
-        │       ├── core/              # Graph, grid, plotting utilities
+        │       ├── core/              # Graph, grid, plotting, source registry (sources.json), converter, manifest
         │       └── steps/             # Individual preprocessing steps
         │
         ├── gymnasium_env/             # Custom Gymnasium environment
@@ -76,6 +76,11 @@ bss-rebalancing/
                 ├── callbacks.py       # Interactive callbacks
                 ├── data_loader.py     # Results data loader
                 └── plotting.py        # Plotting utilities
+
+        scenario/                      # Simulator v2: scenario bundle builder (in progress)
+            ├── README.md
+            ├── pyproject.toml
+            └── src/bss_scenario/      # bss-scenario CLI
 ```
 
 ---
@@ -106,7 +111,17 @@ bss-rebalancing/
    pip install -e .
    ```
 
-   This single command installs all five packages and their CLI tools in development mode.
+   This single command installs all the packages and their CLI tools in development mode.
+
+   **PyTorch and GPUs.** `rl_training` requires `torch>=2.13,<2.16` and `torch-geometric>=2.8,<2.9`
+   (tested with torch 2.15.0 and PyG 2.8.1). The default Linux wheel of torch 2.15 is built for
+   CUDA 13.2 and runs on NVIDIA drivers >= 580 (tested on RTX A6000, driver 580.178). For an older
+   driver, install a matching build first, e.g. CUDA 12.6:
+   ```bash
+   pip install --index-url https://download.pytorch.org/whl/cu126 torch==2.14.1
+   ```
+   CPU only: `pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0`.
+   Checkpoints saved with older torch versions (2.4.1) still load.
 
 4. **Verify installation**:
    ```bash
@@ -136,26 +151,28 @@ bss-rebalancing/
 Download and preprocess trip data, create spatial grid, and compute distance matrices:
 
 ```bash
-# Full pipeline
-bss-preprocess --data-path data/
+# Full pipeline (the data source is mandatory; see core/sources.json)
+bss-preprocess --data-path data/ --source bluebikes
 
 # Specific steps only
-bss-preprocess --data-path data/ --steps download,preprocess,grid
+bss-preprocess --data-path data/ --source bluebikes --steps download,preprocess,grid
 
 # Skip certain steps
-bss-preprocess --data-path data/ --skip download
+bss-preprocess --data-path data/ --source bluebikes --skip download
 
 # Visualize the grid
-bss-preprocess --data-path data/ --plot grid-numbered
+bss-preprocess --data-path data/ --source bluebikes --plot grid-numbered
 ```
 
 **Key arguments**:
+- `--source`: Source id from `sources.json` (**required**; bundled: `bluebikes`, `citibike`)
+- `--sources-json`: Custom sources file (default: the one bundled with the package)
 - `--data-path`: Data directory (default: `data/`)
-- `--year`: Year to process (default: 2022)
-- `--months`: Comma-separated months (default: `9,10`)
-- `--cell-size`: Grid cell size in meters (default: 300)
-- `--steps`: Run specific steps only
+- `--steps` / `--skip`: Run / skip specific steps (`download, preprocess, interpolate, grid, distance, nodes, ev_matrices`)
 - `--plot`: Visualization mode (`graph`, `grid`, `grid-numbered`)
+
+Year, months, bounding box, place name and cell size are no longer CLI flags: they are defined per source in `sources.json`.
+Adding a new bike-share feed means adding an entry there, not changing code.
 
 See `bss-preprocess --help` for all options.
 
@@ -173,7 +190,7 @@ bss-train \
     --results-path results/ \
     --run-id 1 \
     --num-episodes 150 \
-    --num-bikes 400 \
+    --max-num-bikes 400 \
     --exploration-time 0.7 \
     --device cuda:0 \
     --seed 42
@@ -182,29 +199,43 @@ bss-train \
 **Key arguments**:
 - `--run-id`: Experiment identifier (default: 0)
 - `--num-episodes`: Training episodes (default: 140)
-- `--num-bikes`: Fleet size (default: 500)
-- `--exploration-time`: Fraction of episodes for exploration (default: 0.6)
-- `--device`: Hardware device (`cpu`, `cuda:0`, `mps`)
+- `--max-num-bikes`: Fleet size (default: 500)
+- `--min-num-bikes`: Minimum bikes per cell at episode start (default: 1)
+- `--exploration-time`: Fraction of training over which epsilon decays to ~0.1 (default: 0.6)
+- `--device` / `--val-device`: Hardware device for training / validation subprocesses (`cpu`, `cuda:0`, `mps`)
 - `--seed`: Random seed for reproducibility (default: 42)
-- `--one-validation`: Validate only at the end
+- `--enable-repositioning`, `--use-net-flow`: Initial bike distribution strategy
+- `--critic-mode`: `poisson` (default; the critic score uses a forecast sampled from the demand rates, no look-ahead on the
+  simulated trips) or `oracle` (it reads the realised future trips; optimistic, useful for ablations)
+- `--log`: Enable detailed environment logging
+- `--one-validation`: Skip the in-training validations and validate only the final model
+
+During training, once epsilon falls below 0.1 each episode snapshot is validated in a background
+subprocess; the snapshot with the lowest `mean_daily_failures` is promoted to `models/best/`.
 
 ### 3. Validate the Model
 
 Test a trained model on validation data:
 
 ```bash
-bss-validate \
-    --model-path results/run_000/models/best_model.pt \
-    --data-path data/ \
-    --epsilon 0.05 \
-    --total-timeslots 56
+# Validate the best model of a run
+bss-validate --run-id 0 --data-path data/ --results-path results/ --model-type best
+
+# Validate a specific episode snapshot, or an arbitrary checkpoint
+bss-validate --run-id 0 --data-path data/ --results-path results/ --model-type episode --model-episode 42
+bss-validate --run-id 0 --data-path data/ --results-path results/ \
+    --model-path results/run_000/models/best/trained_agent.pt
 ```
 
 **Key arguments**:
-- `--model-path`: Path to trained model (required)
-- `--epsilon`: Exploration rate for validation (default: 0.05)
+- `--run-id`: Run whose models/results are used (default: 0)
+- `--model-type`: `best` (default), `episode` or `final`; with `episode` also pass `--model-episode`
+- `--model-path`: Direct path to a `trained_agent.pt` (takes priority over `--model-type`)
+- `--max-num-bikes` / `--min-num-bikes`: Fleet size / minimum bikes per cell
 - `--total-timeslots`: Episode length (default: 56 = 1 week)
-- `--run-id`: Validation run identifier (default: 999)
+- `--num-seed-runs`: Number of validation episodes with incremented seeds (default: 1)
+
+Validation uses a fixed epsilon of 0.01.
 
 ### 4. Run Benchmarks
 
@@ -218,24 +249,27 @@ bss-benchmark --data-path data/
 bss-benchmark \
     --data-path data/ \
     --results-path results/ \
-    --num-episodes 5 \
-    --maximum-number-of-bikes 400
+    --num-seed-runs 5 \
+    --max-num-bikes 400 \
+    --num-rebal-events 2
 ```
 
 **Key arguments**:
-- `--data-path`: Path to data folder (required)
-- `--results-path`: Where to save results (default: current directory)
-- `--num-episodes`: Number of episodes to simulate (default: 1)
-- `--maximum-number-of-bikes`: Fleet size (default: 300)
+- `--data-path`: Path to data folder (default: `data/`)
+- `--results-path`: Where to save results (default: `results/`)
+- `--num-seed-runs`: Number of weekly episodes with incremented seeds (default: 1)
+- `--max-num-bikes` / `--min-num-bikes`: Fleet size (default: 500) / minimum bikes per cell
+- `--num-rebal-events`: TSP rebalancing events per day (default: 2)
 
 ### 5. Visualize Training Progress
 
 Launch the interactive dashboard to monitor training in real-time:
 
 ```bash
-bss-results-webapp --results-path results/ --port 8050
+bss-results-webapp --results-path results/ --data-path data/ --port 8050
 ```
 
+`--data-path` is optional; it is only needed to draw the spatial heatmaps (it must contain `utils/network.graphml`).
 Then open http://localhost:8050 in your browser.
 
 **Features**:
@@ -251,8 +285,8 @@ Then open http://localhost:8050 in your browser.
 
 ### `preprocessing`
 Handles data download, cleaning, interpolation, grid creation, and distance matrix computation.
-- **CLI**: `bss-preprocess`
-- **Key modules**: `download_trips`, `preprocess_data`, `preprocess_truck_grid`
+- **CLI**: `bss-preprocess` (`--source` selects a feed from `sources.json`)
+- **Key modules**: `download_trips`, `preprocess_data`, `preprocess_truck_grid`, `core/sources`, `core/converter`
 
 ### `gymnasium_env`
 Custom Gymnasium environment implementing the fully dynamic BSS rebalancing problem.
@@ -262,17 +296,23 @@ Custom Gymnasium environment implementing the fully dynamic BSS rebalancing prob
 ### `rl_training`
 DDQN agent implementation with training and validation pipelines.
 - **CLI**: `bss-train`, `bss-validate`
-- **Key modules**: `DQNAgent`, `ReplayBuffer`, `DuelingDQN`
+- **Key modules**: `DQNAgent` (Double DQN), `ReplayBuffer`, `DQN` (GATv2 graph encoder fused with an MLP over the flat environment observation)
 
 ### `benchmark`
 Baseline comparison tools for evaluating RL performance.
 - **CLI**: `bss-benchmark`
-- **Strategies**: Static, naive, demand-based rebalancing
+- **Strategy**: periodic system-wide TSP-based rebalancing (`StaticEnv`) with a configurable number of events per day
 
 ### `results_webapp`
 Interactive Dash web application for training visualization.
 - **CLI**: `bss-results-webapp`
 - **Features**: Real-time monitoring, episode analysis, spatial visualization
+
+### `scenario` (simulator v2, in progress)
+Builds versioned scenario bundles (cleaned trips, networks, demand, truck travel data) for the new
+simulator, as specified in [`docs/sim-v2/SPEC.md`](docs/sim-v2/SPEC.md). Independent of the
+packages above.
+- **CLI**: `bss-scenario`
 
 ---
 
@@ -292,7 +332,7 @@ While not always outperforming all baselines, the agent proved the viability of 
 
 ```bash
 # 1. Preprocess data
-bss-preprocess --data-path data/ --year 2022 --months 9,10
+bss-preprocess --data-path data/ --source bluebikes
 
 # 2. Train agent
 bss-train \
@@ -306,12 +346,10 @@ bss-train \
 bss-results-webapp --results-path results/ --port 8050
 
 # 4. Validate best model
-bss-validate \
-    --model-path results/run_000/models/best_model.pt \
-    --data-path data/
+bss-validate --run-id 0 --data-path data/ --results-path results/ --model-type best
 
 # 5. Compare with baselines
-bss-benchmark --data-path data/
+bss-benchmark --data-path data/ --results-path results/
 ```
 
 ---
@@ -328,6 +366,17 @@ Each subpackage is independently installable and testable. To modify a package:
 cd src/bss_rebalancing/rl_training
 # Make changes to src/rl_training/train.py
 bss-train --help  # Changes are live!
+```
+
+### Tests
+
+`tests/` contains a smoke/regression suite that runs on a tiny synthetic dataset (2x2 cells, generated on the fly, no downloads):
+both environments, the DQN agent and replay buffer (the README's custom training loop), `bss-train --one-validation`
+end to end, the benchmark CLI, and the preprocessing source registry / trip converter.
+
+```bash
+pip install -e . pytest
+pytest tests          # ~1-2 minutes on CPU
 ```
 
 ---

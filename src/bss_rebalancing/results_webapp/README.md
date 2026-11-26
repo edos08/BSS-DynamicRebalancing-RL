@@ -77,8 +77,9 @@ results_webapp/
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--results-path` | str | `"../results"` | Path to results directory |
+| `--data-path` | str | none | Data directory (needs `utils/network.graphml`); enables the spatial heatmaps |
 | `--port` | int | `8050` | Port to run server on |
-| `--update-interval` | int | `5000` | Auto-refresh interval (milliseconds) |
+| `--update-interval` | int | `300000` | Auto-refresh interval (milliseconds, i.e. 5 minutes) |
 | `--debug` | flag | — | Enable debug mode (auto-reload) |
 
 ---
@@ -258,7 +259,7 @@ bss-results-webapp --results-path /absolute/path/to/results
 **Issue**: Data doesn't refresh during training
 
 **Solution**:
-- Check auto-refresh interval (default: 5000ms)
+- Check auto-refresh interval (CLI default: 300000 ms = 5 minutes; lower it with `--update-interval 5000`)
 - Verify training is writing files to correct location
 - Look for errors in browser console (F12)
 
@@ -269,7 +270,7 @@ bss-results-webapp --results-path /absolute/path/to/results
 **Cause**: No validation has been run yet
 
 **Solution**:
-- Run validation: `bss-validate --model-path ... --data-path ...`
+- Run validation: `bss-validate --run-id N --data-path data/ --results-path results/ --model-type best`
 - Or wait for periodic validation during training
 
 ### Slow Performance
@@ -277,7 +278,7 @@ bss-results-webapp --results-path /absolute/path/to/results
 **Issue**: Dashboard is laggy with many episodes
 
 **Solutions**:
-- Increase update interval: `--update-interval 10000` (10 seconds)
+- Increase the update interval: `--update-interval 600000` (10 minutes)
 - Use summary CSVs instead of loading individual episodes
 - Filter episodes in callbacks (reduce data volume)
 
@@ -287,14 +288,15 @@ bss-results-webapp --results-path /absolute/path/to/results
 
 ### Custom Port Configuration
 
-Run multiple dashboards simultaneously:
+Run multiple dashboards simultaneously. `--results-path` must point to a directory that *contains* `run_NNN` folders
+(not to a single run folder), so use separate result roots:
 
 ```bash
-# Dashboard for run 1
-bss-results-webapp --results-path results/run_001 --port 8050
+# Dashboard for experiment A
+bss-results-webapp --results-path results_a/ --port 8050
 
-# Dashboard for run 2 (different terminal)
-bss-results-webapp --results-path results/run_002 --port 8051
+# Dashboard for experiment B (different terminal)
+bss-results-webapp --results-path results_b/ --port 8051
 ```
 
 ### Programmatic Usage
@@ -306,8 +308,9 @@ from results_webapp.app import create_app
 
 app = create_app(
     results_path="results/",
+    data_path="data/",          # optional, enables the spatial heatmaps
     port=8050,
-    update_interval_ms=5000
+    update_interval_ms=5000     # the CLI default is 300000
 )
 
 app.run(debug=True, host='0.0.0.0', port=8050)

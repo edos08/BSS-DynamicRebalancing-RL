@@ -4,7 +4,7 @@ BSS Preprocessing Pipeline
 Preprocessing utilities for the BSS Dynamic Rebalancing RL project.
 """
 
-__version__ = "0.1.0"
+__version__ = "1.1.0"
 
 from preprocessing.core.utils import (
     nodes_within_radius,

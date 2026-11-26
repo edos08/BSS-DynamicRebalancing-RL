@@ -47,24 +47,31 @@ bss-train \
     --results-path results/ \
     --run-id 1 \
     --num-episodes 150 \
-    --num-bikes 300 \
+    --max-num-bikes 300 \
     --device cuda:0 \
     --seed 42 \
     --exploration-time 0.6 \
-    --enable-logging
+    --log
 ```
+
+Once epsilon drops below 0.1, every episode snapshot is validated in a background subprocess
+(`validate.py`), and the snapshot with the lowest validation `mean_daily_failures` is promoted to `models/best/`.
 
 ### Validation
 
-Validate a trained model:
+Validate the best model of a run (or a specific one):
 
 ```bash
-bss-validate \
-    --model-path results/run_001/models/best/episode_139/trained_agent.pt \
-    --data-path data/ \
-    --results-path results/validation/ \
-    --min-epsilon 0.05 \
-    --num-bikes 300
+# Best model of run 1
+bss-validate --run-id 1 --data-path data/ --results-path results/ --model-type best
+
+# A specific episode snapshot
+bss-validate --run-id 1 --data-path data/ --results-path results/ \
+    --model-type episode --model-episode 95
+
+# Any checkpoint file
+bss-validate --run-id 1 --data-path data/ --results-path results/ \
+    --model-path results/run_001/models/best/trained_agent.pt --max-num-bikes 300
 ```
 
 ---
@@ -101,20 +108,46 @@ rl_training/
 
 ### CLI Arguments
 
+`bss-train`:
+
 | Argument | Type | Default | Description |
 |----------|------|---------|-------------|
 | `--run-id` | int | `0` | Experiment run identifier |
 | `--data-path` | str | `"data/"` | Path to preprocessed data directory |
 | `--results-path` | str | `"results/"` | Path to save results and models |
-| `--device` | str | `"cpu"` | Hardware device (`cpu`, `cuda:0`, `mps`) |
-| `--seed` | int | `42` | Random seed for reproducibility |
-| `--num-episodes` | int | `140` | Total training episodes (weeks) |
-| `--num-bikes` | int | `500` | System bike fleet size |
-| `--exploration-time` | float | `0.6` | Fraction of training for exploration |
-| `--enable-logging` | flag | — | Enable detailed environment logging |
-| `--one-validation` | flag | — | Validate only at training end |
+| `--device` | str | `"cpu"` | Training device (`cpu`, `cuda:0`, `mps`) |
+| `--val-device` | str | same as `--device` | Device for the validation subprocesses |
+| `--seed` | int | `42` | Random seed (episode `i` uses `seed + i`) |
+| `--num-episodes` | int | `140` | Total training episodes (one week each) |
+| `--max-num-bikes` | int | `500` | System bike fleet size |
+| `--min-num-bikes` | int | `1` | Minimum bikes per cell at episode start |
+| `--enable-repositioning` | flag | — | Distribute extra bikes beyond the per-cell minimum |
+| `--use-net-flow` | flag | — | Bias that distribution by predicted net flow (otherwise random) |
+| `--exploration-time` | float | `0.6` | Fraction of training after which epsilon is ≈ 0.1 |
+| `--critic-mode` | str | `poisson` | `poisson`: the critic score uses a demand forecast sampled from the rates (no look-ahead); `oracle`: it reads the realised future trips |
+| `--log` | flag | — | Enable detailed environment logging |
+| `--one-validation` | flag | — | Do not validate during training; validate only the final model |
 
-### Default Hyperparameters
+`bss-validate`:
+
+| Argument | Type | Default | Description |
+|----------|------|---------|-------------|
+| `--run-id` | int | `0` | Run whose models/results are used |
+| `--data-path` / `--results-path` | str | `data/` / `results/` | Same roots used for training |
+| `--model-type` | str | `best` | `best`, `episode` or `final` |
+| `--model-episode` | int | — | Episode to load when `--model-type episode` |
+| `--model-path` | str | — | Direct path to a `trained_agent.pt` (overrides `--model-type`) |
+| `--max-num-bikes` / `--min-num-bikes` | int | `500` / `1` | Fleet size / minimum bikes per cell |
+| `--total-timeslots` | int | `56` | Episode length in 3-hour slots |
+| `--enable-repositioning` / `--use-net-flow` | flag | — | Initial distribution strategy |
+| `--critic-mode` | str | `poisson` | Critic forecast mode; use the one the model was trained with (`bss-train` passes it on) |
+| `--num-seed-runs` | int | `1` | Number of validation episodes (seed, seed+1, …) |
+| `--device` | str | `cpu` | Device |
+| `--non-interactive` | flag | — | Fail instead of prompting if results exist (used by `bss-train`) |
+
+Validation runs with a fixed epsilon of 0.01.
+
+### Default Hyperparameters (`train.py`)
 
 ```python
 params = {
@@ -122,32 +155,31 @@ params = {
     "batch_size": 64,                    # Replay buffer batch size
     "replay_buffer_capacity": 100000,    # Buffer capacity
     "gamma": 0.95,                       # Discount factor
-    "epsilon_start": 1.0,                # Initial exploration rate
-    "epsilon_end": 0.01,                 # Final exploration rate
-    "epsilon_decay": 1e-5,               # Epsilon decay constant
+    "epsilon_start": 1.0,
+    "epsilon_end": 0.01,
+    "exploration_time": 0.6,             # epsilon_decay is derived from this (see below)
     "lr": 1e-4,                          # Learning rate (SGD)
     "total_timeslots": 56,               # Timeslots per episode (1 week)
-    "maximum_number_of_bikes": 500,      # Fleet size
-    "tau": 0.005,                        # Soft target update rate
-    "depot_position_id": 103,            # Depot cell ID
-    "initial_cell_id": 103               # Starting cell ID
+    "maximum_number_of_bikes": 500,
+    "minimum_number_of_bikes": 1,
+    "depot_position_id": 18,             # Depot cell ID
+    "validation_epsilon_threshold": 0.1, # Start validating below this epsilon
+    "validation_timeout": 600,           # Seconds to wait for a validation subprocess
 }
 ```
 
-### Reward Parameters
+- **Epsilon schedule**: `eps(t) = eps_end + (eps_start - eps_end) * exp(-t² / decay)`, with `t` counted in timeslots
+  and `decay = T² / ln(10)`, `T = exploration_time * num_episodes * total_timeslots`. At `t = T`, `eps ≈ 0.109`.
+- **Target network**: hard update every 8 timeslots (the soft update is disabled in `train_step`; `tau` is currently unused).
+- **Depot cell**: `depot_position_id` (18) is hard-coded in `train.py`, `validate.py` and the benchmark; it must exist in your grid
+  (check with `bss-preprocess --plot grid-numbered`).
 
-Configurable reward weights for shaping agent behavior:
+### Reward
 
-```python
-reward_params = {
-    'W_ZERO_BIKES': 1.0,          # Weight for empty station penalty
-    'W_CRITICAL_ZONES': 1.0,      # Weight for critical zone rewards
-    'W_DROP_PICKUP': 0.9,         # Weight for drop/pickup actions
-    'W_MOVEMENT': 0.7,            # Weight for movement costs
-    'W_CHARGE_BIKE': 0.9,         # Weight for charging actions
-    'W_STAY': 0.7,                # Weight for stay penalties
-}
-```
+The reward is defined in the environment, not in the trainer: see `RewardComponents` in
+`gymnasium_env/envs/fully_dynamic_env.py` (base step cost, invalid-action and loop penalties, drop / pick-up / charge terms,
+eligibility exploration terms, a term on the change of the global critic score and a final penalty of
+`total_failures / total_timeslots`). The constants used in a run are saved to `training/config.json`.
 
 ---
 
@@ -155,92 +187,83 @@ reward_params = {
 
 ### DQN Network
 
-Graph Attention Network (GAT) based Q-network with:
+Hybrid Q-network: a Graph Attention encoder over the cell graph, fused with an MLP over the flat environment observation.
 
-#### Graph Encoder
-- **Layer 1**: 4 input features → 64 features (4 heads, concat) → 256
-- **Layer 2**: 256 → 64 features (4 heads, concat) → 256
-- **Layer 3**: 256 → 128 features (2 heads, concat) → 256
+#### Graph encoder (one node per cell, edges = adjacent cells with normalized distance)
+- Node features (4): `truck_cell`, `critic_score`, `eligibility_score`, `total_bikes`
+- 3 × `GATv2Conv` (4→64×4 heads, 256→64×4 heads, 256→128×2 heads, edge dim 1) with ReLU
+- `AttentionalAggregation` global pooling → 256
+- FC: 256 → 256 → 256 → 128 → 64
 
-#### Global Pooling
-- **GlobalAttention**: Attention-based graph-level aggregation → 256
+#### Agent-state encoder
+- Input: the environment observation, of size `17 + 2 × n_cells`
+  (5 scalars, 8-dim previous-action one-hot, truck-position one-hot, critical-cell flags, 4 border flags)
+- FC: input → 256 → 256 → 128 → 64
 
-#### Graph Embedding
-- FC layers: 256 → 256 → 128 → 64
-
-#### Agent State Encoder
-- Input: 162-dimensional agent state (truck load, position, action history)
-- FC layers: 162 → 256 → 256 → 128 → 64
-
-#### Fusion and Q-Values
-- Concatenate: graph embedding (64) + agent embedding (64) → 128
-- FC layers: 128 → 256 → 128 → 8 (Q-values for 8 actions)
+#### Fusion
+- Concatenate (64 + 64) → FC 256 → 128 → 8 Q-values (one per action)
 
 ### DQN Agent
 
-Features:
-- **Epsilon-greedy exploration** with exponential decay
-- **Experience replay** with graph-structured transitions
-- **Target network** with soft updates (τ=0.005)
-- **Action masking** to prevent invalid moves
-- **Gradient clipping** (max_norm=10.0)
-- **Smooth L1 loss** (Huber loss)
+- **Double DQN**: the online network selects the next action, the target network evaluates it
+- **Epsilon-greedy** exploration with the schedule above
+- **Experience replay** of graph-pair transitions (`PairData`)
+- **Optimizer**: SGD, **loss**: Smooth L1, gradient clipping (max norm 10)
+- **n-step discount**: `gamma ** steps`, where `steps` is the number of simulation ticks the action took
+- **Action masking** is supported by `select_action(..., avoid_action=[...])`
 
 ### Replay Buffer
 
-Custom `PairData` structure for storing graph transitions:
-- **Source state** (S): graph with node features, edges, agent state
-- **Target state** (S'): next graph configuration
-- **Transition data**: action, reward, done flag, n-steps
-- **Batch sampling**: Efficient batching with PyTorch Geometric
+`ReplayBuffer` stores `PairData` objects holding the source graph (`x_s`, `edge_index_s`, `edge_attr_s`), the next graph
+(`x_t`, …), the agent states, action, reward, done flag and step count. Batches are built with PyTorch Geometric.
+`save_to_files` / `load_from_files` persist it in chunks.
 
 ---
 
 ## Results Management
 
-The `ResultsManager` provides structured experiment tracking:
+The `ResultsManager` provides structured experiment tracking.
 
 ### Directory Structure
 
 ```
 results/
 └── run_001/
-    ├── config.json                     # Hyperparameters
     ├── training/
-    │   ├── training_summary.csv        # Aggregated metrics
+    │   ├── config.json                 # Hyperparameters, env defaults, reward constants
+    │   ├── train_summary.csv           # One row per episode
+    │   ├── logs/train.log
     │   └── episode_000/
-    │       ├── scalars.json            # Total reward, failures, etc.
+    │       ├── scalars.json            # Total reward, failures, mean_daily_failures, ...
     │       ├── timeslot_metrics.csv    # Per-timeslot metrics
-    │       ├── step_data.pkl.gz        # Actions, Q-values, losses
-    │       └── cell_subgraph.gpickle   # Spatial data
+    │       ├── step_data.pkl.gz        # Actions, Q-values, reward per action, critic scores
+    │       └── cell_subgraph.gpickle   # Per-cell statistics (spatial data)
     ├── validation/
-    │   ├── validation_summary.csv
-    │   └── episode_000/
-    │       └── ...
+    │   └── episode_095/                # One folder per validated model ("best", "episode_NNN", "custom", ...)
+    │       ├── config.json
+    │       ├── validation_summary.csv
+    │       ├── logs/validate.log
+    │       └── episode_000/            # One per --num-seed-runs, same files as training episodes
     └── models/
-        ├── checkpoints/
-        │   └── episode_139/
-        │       ├── trained_agent.pt
+        ├── episodes/
+        │   └── episode_095/
+        │       ├── trained_agent.pt    # {'train_model': ..., 'target_model': ...}
         │       └── metadata.json
         ├── best/
-        │   └── episode_095/
-        │       └── trained_agent.pt
+        │   ├── trained_agent.pt        # Snapshot with the best validation score
+        │   └── metadata.json
         └── best_models_summary.csv
 ```
 
 ### Tracked Metrics
 
-**Episode-level**:
-- Total reward, mean failures, total trips, invalid actions, epsilon
+**Episode-level**: total reward, total / mean daily failures, invalid actions, epsilon, mean Q-values
 
-**Timeslot-level**:
-- Reward per timeslot, failures per timeslot, deployed bikes
+**Timeslot-level**: reward, failures, demand, deployed / depot / truck / traveling / outside bikes, epsilon
 
-**Step-level**:
-- Actions, reward per action type, Q-values, TD loss, critic scores
+**Step-level**: actions, reward per action type, global critic score
 
-**Spatial**:
-- Cell-level statistics (bikes, failures, rebalancing operations)
+**Spatial**: per-cell failures, failure rate, visits, operations, pick-ups, drops, rebalanced count, mean critic, mean bikes
 
 ---
 
@@ -248,67 +271,64 @@ results/
 
 ### Custom Training Loop
 
+The reference implementation is `train_dqn()` in `train.py`. In short:
+
 ```python
 import gymnasium as gym
-from rl_training import DQNAgent, ReplayBuffer, ResultsManager, set_seed
+import gymnasium_env  # registers the environments
+import torch
+from torch_geometric.data import Data
 
-# Set seed for reproducibility
-set_seed(42)
-
-# Create environment
-env = gym.make("gymnasium_env/FullyDynamicEnv-v0", data_path="data/")
-
-# Initialize agent
-replay_buffer = ReplayBuffer(max_size=100000)
-agent = DQNAgent(
-    num_actions=8,
-    replay_buffer=replay_buffer,
-    gamma=0.95,
-    lr=1e-4,
-    device='cuda:0'
+from rl_training import (
+    DQNAgent, ReplayBuffer, set_seed,
+    build_cell_graph_from_cells, update_cell_graph_features, convert_graph_to_data,
 )
 
-# Initialize results manager
-results_mgr = ResultsManager.create_with_auto_increment("results/")
+set_seed(42)
+env = gym.make("gymnasium_env/FullyDynamicEnv-v0", data_path="data/", results_path="results/")
+agent = DQNAgent(
+    num_actions=env.action_space.n,
+    observation_space_len=env.observation_space.shape[0],
+    replay_buffer=ReplayBuffer(100_000),
+    gamma=0.95, lr=1e-4, device="cpu",
+)
 
-# Training loop
-for episode in range(140):
-    state, info = env.reset()
-    done = False
-    total_reward = 0
+FEATURES = ["truck_cell", "critic_score", "eligibility_score", "total_bikes"]
+obs, info = env.reset(options={"total_timeslots": 56, "maximum_number_of_bikes": 500, "depot_id": 18})
+graph = build_cell_graph_from_cells(info["cell_dict"], info["nodes_dict"], info["distance_lookup"])
+state = convert_graph_to_data(graph, node_features=FEATURES)
+state.agent_state, state.steps = obs, info["steps"]
 
-    while not done:
-        action = agent.select_action(state, epsilon_greedy=True)
-        next_state, reward, done, _, info = env.step(action)
-
-        replay_buffer.push(state, action, reward, next_state, done)
-        loss = agent.train_step(batch_size=64)
-
-        state = next_state
-        total_reward += reward
-
-    agent.update_target_network()
-    print(f"Episode {episode}: Reward = {total_reward:.2f}")
-```
-
-### Load and Validate Model
-
-```python
-from rl_training import DQNAgent
-
-# Load trained model
-agent = DQNAgent(num_actions=8, device='cuda:0')
-agent.load_model("results/run_001/models/best/episode_095/trained_agent.pt")
-
-# Validate
-env = gym.make("gymnasium_env/FullyDynamicEnv-v0", data_path="data/")
-state, _ = env.reset()
-
-# Greedy evaluation
 done = False
 while not done:
-    action = agent.select_action(state, greedy=True)
-    state, reward, done, _, _ = env.step(action)
+    single = Data(
+        x=state.x, edge_index=state.edge_index, edge_attr=state.edge_attr,
+        agent_state=torch.tensor(state.agent_state, dtype=torch.float32).unsqueeze(0),
+        batch=torch.zeros(state.x.size(0), dtype=torch.long),
+    )
+    action = agent.select_action(single, epsilon_greedy=True)
+    obs, reward, done, timeslot_done, info = env.step(action)
+
+    update_cell_graph_features(graph, info["cell_dict"])
+    next_state = convert_graph_to_data(graph, node_features=FEATURES)
+    next_state.agent_state, next_state.steps = obs, info["steps"]
+
+    agent.replay_buffer.push(state, action, reward, next_state, done)
+    agent.train_step(batch_size=64)
+    if timeslot_done:
+        agent.update_epsilon()
+    state = next_state
+
+env.close()
+```
+
+### Load a Trained Model
+
+```python
+agent = DQNAgent(num_actions=8, observation_space_len=env.observation_space.shape[0], device="cpu")
+agent.load_model("results/run_001/models/best/trained_agent.pt")
+agent.train_model.eval()
+action = agent.select_action(single_state, greedy=True)   # single_state: a PyG `Data` as above
 ```
 
 ---
@@ -320,8 +340,8 @@ while not done:
 **Issue**: Training crashes with CUDA OOM error
 
 **Solutions**:
-- Reduce batch size: `--batch-size 32`
-- Reduce replay buffer capacity in code: `replay_buffer_capacity=50000`
+- Reduce `batch_size` / `replay_buffer_capacity` in `params` (`train.py`)
+- Use a separate device for validation: `--val-device cpu`
 - Use CPU: `--device cpu`
 
 ### Slow Training
@@ -334,7 +354,7 @@ while not done:
 - CPU-only training
 
 **Solutions**:
-- Disable logging: remove `--enable-logging`
+- Disable logging: remove `--log`
 - Use GPU: `--device cuda:0`
 - Increase cell size during preprocessing
 
