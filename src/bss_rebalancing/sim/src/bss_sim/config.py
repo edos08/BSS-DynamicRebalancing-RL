@@ -116,6 +116,48 @@ class TravelConfig:
 
 
 @dataclass(frozen=True)
+class VehicleConfig:
+    """Van energy model parameters (``bss_sim.vehicle``); defaults = the ``e_transit`` preset."""
+
+    preset: str = "e_transit"
+    mass_kg: float = 2900.0
+    usable_kwh: float = 68.0
+    crr: float = 0.012
+    cda_m2: float = 2.0
+    drivetrain_eff: float = 0.85
+    regen_eff: float = 0.6
+    aux_kw: float = 2.0
+    service_aux_kw: float = 0.5
+    stops_per_km: float = 3.0
+    bike_kg: float = 25.0
+
+    def __post_init__(self):
+        _check(self.preset == "e_transit", f"vehicle.preset: only 'e_transit' is defined, got {self.preset!r}")
+        for name in ("mass_kg", "usable_kwh", "crr", "cda_m2", "drivetrain_eff", "bike_kg"):
+            _check(getattr(self, name) > 0, f"vehicle.{name} must be > 0")
+        _check(0 < self.drivetrain_eff <= 1 and 0 <= self.regen_eff <= 1, "vehicle efficiencies must be in [0, 1]")
+        for name in ("aux_kw", "service_aux_kw", "stops_per_km"):
+            _check(getattr(self, name) >= 0, f"vehicle.{name} must be >= 0")
+
+
+@dataclass(frozen=True)
+class CostConfig:
+    """Operating cost (USD) and emission factors; sources in ``bss_sim.vehicle``. KPIs only."""
+
+    electricity_usd_per_kwh: float = 0.22
+    charging_efficiency: float = 0.90
+    driver_usd_per_hour: float = 22.68
+    van_usd_per_km: float = 0.10
+    battery_swap_usd: float = 0.0
+    grid_kgco2e_per_kwh: float = 0.254
+
+    def __post_init__(self):
+        _check(0 < self.charging_efficiency <= 1, "costs.charging_efficiency must be in (0, 1]")
+        for f in dataclasses.fields(self):
+            _check(getattr(self, f.name) >= 0, f"costs.{f.name} must be >= 0")
+
+
+@dataclass(frozen=True)
 class TelemetryConfig:
     event_log: bool = False              # columnar log of every event outcome
     snapshot_every_s: float | None = None  # periodic per-node bike counts in the log
@@ -133,6 +175,8 @@ class SimConfig:
     users: UserConfig = field(default_factory=UserConfig)
     external: ExternalConfig = field(default_factory=ExternalConfig)
     travel: TravelConfig = field(default_factory=TravelConfig)
+    vehicle: VehicleConfig = field(default_factory=VehicleConfig)
+    costs: CostConfig = field(default_factory=CostConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     debug: bool = False                  # check invariants after every event (slow)
 
