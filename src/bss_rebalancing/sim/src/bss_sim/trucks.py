@@ -17,7 +17,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 
-from bss_sim.commands import Command, GoTo, ToDepot, Wait
+from bss_sim.commands import Command, Drop, GoTo, PickUp, Restock, ToDepot, Wait
 
 TRUCK_IDLE = "truck_idle"
 COMMAND_DONE = "command_done"
@@ -38,12 +38,15 @@ class Truck:
     serial: int = 0                # increments per command; stale events are ignored
     target: tuple[int, int] | None = None  # (bike node, drive node) of a drive in progress
     planned: int = 0               # quantity planned at the start of a service
+    limit: str = ""                # why the plan is below the request ("" if it is not)
     # accounting (KPIs, #126)
     km: float = 0.0
     drive_s: float = 0.0
     service_s: float = 0.0
     wait_s: float = 0.0
     commands_done: int = 0
+    picked: int = 0
+    dropped: int = 0
 
     @property
     def busy(self) -> bool:
@@ -51,13 +54,28 @@ class Truck:
 
 
 def validate(cmd: Command, n_nodes: int) -> str:
-    """Why a command is invalid ("" if it is fine)."""
+    """Why a command is invalid regardless of the state ("" if it is fine)."""
+    def node_ok(v) -> bool:
+        return isinstance(v, int) and not isinstance(v, bool) and 0 <= v < n_nodes
+
+    def count_ok(n) -> bool:
+        return isinstance(n, int) and not isinstance(n, bool) and n >= 0
+
     if isinstance(cmd, GoTo):
-        if not (isinstance(cmd.node, int) and 0 <= cmd.node < n_nodes):
+        if not node_ok(cmd.node):
             return f"invalid: node {cmd.node!r} not a bike node"
     elif isinstance(cmd, Wait):
         if not (cmd.seconds >= 0):
             return "invalid: negative wait"
+    elif isinstance(cmd, PickUp):
+        if not count_ok(cmd.n) or cmd.policy not in ("lowest_battery", "nearest") or not cmd.radius_m >= 0:
+            return "invalid: PickUp needs n >= 0, policy lowest_battery|nearest, radius_m >= 0"
+    elif isinstance(cmd, Drop):
+        if not count_ok(cmd.n) or (cmd.at is not None and (not cmd.at or not all(node_ok(v) for v in cmd.at))):
+            return "invalid: Drop needs n >= 0 and at = None or bike nodes"
+    elif isinstance(cmd, Restock):
+        if (cmd.load is not None and not count_ok(cmd.load)) or (cmd.batteries is not None and not count_ok(cmd.batteries)):
+            return "invalid: Restock load / batteries must be >= 0"
     elif not isinstance(cmd, ToDepot):
         return f"unsupported: {type(cmd).__name__}"
     return ""
