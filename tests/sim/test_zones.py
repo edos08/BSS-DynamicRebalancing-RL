@@ -48,3 +48,18 @@ def test_zones_as_partitions(sc, tmp_path):
     sim.add_partition(z.name, z.node_to_zone)
     sim.reset(seed=1, start="2024-09-17T08:00")
     assert sim.partition(z.name).bikes.sum() == 50
+
+
+def test_nodes_within_is_the_walking_neighbourhood(sc):
+    sim = Simulator(sc, SimConfig.from_dict({"fleet": {"size": 10}}))
+    sim.reset(seed=0, start="2024-09-17T08:00")
+    near = sim.nodes_within(210, 120.0)
+    assert near[0] == 210 and set(near) == {210, 209, 211, 190, 230, 189, 191, 229, 231, 170, 250, 212, 208}
+    with pytest.raises(ValueError):
+        sim.nodes_within(210, 10_000)
+    T = sim.expected_drive_times([210, 0], [210, 399])
+    assert T.shape == (2, 2) and T[0, 0] == 0 and T[1, 1] > 0 and (T >= 0).all()
+    b2d = sc.bike_to_drive
+    assert T[1, 1] == np.asarray(sc.drive_time)[b2d[0], b2d[399]]       # free flow, scale 1
+    D = sim.expected_drive_distances([0], [399])
+    assert D[0, 0] > 0

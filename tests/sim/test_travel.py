@@ -88,3 +88,18 @@ def test_make_travel_and_config(syn, tmp_path):
     for bad in ({"model": "teleport"}, {"scale": 0}, {"noise_sigma": -1}):
         with pytest.raises(ConfigError):
             SimConfig.from_dict({"travel": bad})
+
+
+def test_expected_time_matrices_match_single_drives(syn):
+    sc = Scenario.load(syn)
+    t, d, by = np.asarray(sc.drive_time), np.asarray(sc.drive_dist), np.asarray(sc.drive_time_by_class())
+    f = np.ones((3, 24, 3))
+    f[0, 8] = [2.0, 1.5, 1.0]
+    for m in (FreeFlow(t, d, scale=1.2, noise_sigma=0.5), CongestionFactors(t, d, by, f, noise_sigma=0.5)):
+        m.bind(np.random.default_rng(0), dt.date(2024, 9, 16))
+        a, b = np.array([0, 5, 99]), np.array([7, 50])
+        M = m.matrix(a, b, 8.5 * 3600)
+        assert M.shape == (3, 2)
+        for i, x in enumerate(a):
+            for j, y in enumerate(b):
+                assert M[i, j] == pytest.approx(m.base_time(int(x), int(y), 8.5 * 3600))
