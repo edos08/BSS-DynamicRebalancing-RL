@@ -133,3 +133,21 @@ def test_vectorised_ride_time_sampling_matches_the_loop(bundle):
     kind = rng.integers(0, 2, n)
     u = rng.random(n)
     np.testing.assert_allclose(rt.sample(dist, kind, u), rt._sample_loop(dist, kind, u), rtol=1e-12)
+
+
+def test_ride_times_are_capped_even_with_a_zero_speed_quantile(tmp_path):
+    levels = np.linspace(0, 1, 11)
+    speed = np.tile(np.linspace(0.0, 6.0, 11), (2, 2, 1))       # lowest speed quantile is 0 m/s (#138)
+    rnd = np.tile(np.linspace(60.0, 7200.0, 11), (2, 1))
+    np.savez(tmp_path / "rt.npz", bands_m=np.array([0.0, 1000.0, np.inf]), levels=levels, speed_q=speed, round_q=rnd,
+             max_duration_s=np.float64(7200.0))
+    rt = RideTimes(tmp_path / "rt.npz")
+    assert rt.max_s == 7200.0
+    u = np.concatenate([[0.0, 1e-9], np.random.default_rng(0).random(5000)])
+    dist = np.full(len(u), 3000.0)
+    kind = np.zeros(len(u), dtype=int)
+    for t in (rt.sample(dist, kind, u), rt._sample_loop(dist, kind, u)):
+        assert np.isfinite(t).all() and t.max() == 7200.0
+    assert (rt.cdf(np.array([7200.0, 9000.0]), np.array([3000.0, 0.0]), np.array([0, 1])) == 1.0).all()
+    np.savez(tmp_path / "old.npz", bands_m=np.array([0.0, 1000.0, np.inf]), levels=levels, speed_q=speed, round_q=rnd)
+    assert RideTimes(tmp_path / "old.npz").max_s == 10800.0   # bundles built before the fix
