@@ -112,3 +112,14 @@ def test_no_trucks(bundle):
     assert sim.reset(seed=1, start=START) == []
     sim.run(TimeLimit(3600))
     assert sim.fleet.counts()["on_truck"] == 0
+
+
+def test_run_returns_at_once_when_a_stop_notification_is_pending(syn):
+    sim = make(syn)
+    sim.reset(seed=1, start=START)
+    t = sim.now
+    sim.submit(0, [GoTo(-1)])                 # invalid: done at once, the truck is idle again
+    notes = sim.run(OnNotification("truck_idle") | TimeLimit(3600))
+    assert sim.now == t and [n.kind for n in notes] == ["command_done", "truck_idle"]
+    notes = sim.run(TimeLimit(60))            # a time-only condition is not affected
+    assert sim.now == t + 60

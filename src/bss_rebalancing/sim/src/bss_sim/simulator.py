@@ -489,6 +489,10 @@ class Simulator:
         kinds = until.kinds()
         if deadline == math.inf and not kinds:
             raise ValueError("run(until=...) needs a time limit or a notification to stop on")
+        if kinds and any(nt.kind in kinds for nt in self._notes):
+            # already met: e.g. a command submitted since the last run finished at once (truck idle)
+            notes, self._notes = self._notes, []
+            return notes
         heap = self.queue._heap
         pop = heapq.heappop
         debug = self.config.debug
