@@ -5,7 +5,8 @@ Reference controllers for the RL agents (spec §14, epic #42), on Cambridge 2024
 ## Setup
 
 - **Simulation**: one week from Mon 2024-09-16, 3 seeds. Demand from the fitted model (Poisson), 800
-  bikes, one Ford E-Transit van starting at the depot with 15 bikes and 60 batteries. Travel at free
+  bikes, one Ford E-Transit van starting at the depot with 15 bikes and 60 batteries. The van works
+  06:00–22:00: at 22:00 it returns to the depot and restocks, and it is idle overnight. Travel at free
   flow; the traffic factors come with #57.
 - **Dockless**: bikes start where demand is.
 - **Docked**: 1,824 docks; bikes start spread by dock capacity.
@@ -26,56 +27,62 @@ Reference controllers for the RL agents (spec §14, epic #42), on Cambridge 2024
 
 | controller | served (city) | failed requests | mean walk m | redirects | bikes moved | swaps | van km | kWh | cost USD | kg CO2e | decisions | wall s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| DoNothing | 78.1% ± 0.7% | 12,711 | 28 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0.4 |
-| StaticTSP 3 h | 80.3% ± 0.6% | 11,325 | 25 | 0 | 6,766 | 0 | 952 | 344 | 3,685 | 97 | 109 | 2.0 |
-| StaticTSP 1 h | 79.9% ± 0.8% | 11,574 | 26 | 0 | 6,627 | 0 | 735 | 274 | 3,407 | 77 | 325 | 2.1 |
-| GreedyDeficit | 80.2% ± 0.6% | 11,371 | 25 | 0 | 7,513 | 0 | 967 | 349 | 3,992 | 99 | 1,009 | 25.1 |
-| GreedyDeficit + swaps | 80.2% ± 0.6% | 11,394 | 25 | 0 | 7,425 | 58 | 965 | 349 | 3,992 | 99 | 987 | 24.7 |
+| DoNothing | 78.1% ± 0.7% | 12,711 | 28 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0.5 |
+| StaticTSP 3 h | 80.4% ± 0.5% | 11,243 | 25 | 0 | 4,541 | 0 | 731 | 259 | 2,586 | 73 | 118 | 2.9 |
+| StaticTSP 1 h | 80.0% ± 0.6% | 11,499 | 26 | 0 | 4,505 | 0 | 570 | 208 | 2,403 | 59 | 296 | 1.8 |
+| GreedyDeficit | 80.3% ± 0.7% | 11,340 | 25 | 0 | 4,928 | 0 | 717 | 255 | 2,723 | 72 | 718 | 19.5 |
+| GreedyDeficit + swaps | 80.4% ± 0.6% | 11,258 | 25 | 0 | 4,866 | 54 | 693 | 247 | 2,718 | 70 | 705 | 18.5 |
 
 **docked**
 
 | controller | served (city) | failed requests | mean walk m | redirects | bikes moved | swaps | van km | kWh | cost USD | kg CO2e | decisions | wall s |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
 | DoNothing | 95.1% ± 0.8% | 2,272 | 2 | 24,452 | 0 | 0 | 0 | 0 | 0 | 0 | 0 | 0.4 |
-| StaticTSP 3 h | 96.7% ± 0.7% | 1,527 | 2 | 24,082 | 5,044 | 0 | 1,488 | 511 | 3,555 | 144 | 109 | 2.0 |
-| StaticTSP 1 h | 96.8% ± 0.7% | 1,506 | 1 | 21,541 | 5,699 | 0 | 1,190 | 415 | 3,520 | 117 | 325 | 2.0 |
-| GreedyDeficit | 97.1% ± 0.7% | 1,326 | 1 | 20,066 | 6,445 | 0 | 1,450 | 498 | 4,077 | 141 | 1,322 | 15.8 |
-| GreedyDeficit + swaps | 97.1% ± 0.7% | 1,350 | 1 | 19,642 | 6,339 | 58 | 1,463 | 502 | 4,079 | 142 | 1,298 | 15.5 |
+| StaticTSP 3 h | 96.7% ± 0.7% | 1,543 | 2 | 23,081 | 3,461 | 0 | 1,028 | 354 | 2,462 | 100 | 118 | 1.7 |
+| StaticTSP 1 h | 96.8% ± 0.8% | 1,508 | 2 | 20,291 | 3,923 | 0 | 846 | 295 | 2,476 | 83 | 296 | 1.6 |
+| GreedyDeficit | 97.0% ± 0.7% | 1,370 | 1 | 18,957 | 4,335 | 0 | 980 | 335 | 2,765 | 95 | 880 | 11.9 |
+| GreedyDeficit + swaps | 97.0% ± 0.6% | 1,370 | 1 | 18,866 | 4,237 | 67 | 977 | 335 | 2,767 | 95 | 862 | 11.7 |
 
 ## Gains against doing nothing (paired by seed, ± s.d.)
 
-| mode | controller | Δ served (pp) | extra trips served | cost per extra trip (USD) | bikes moved per van km |
-|---|---|---|---|---|---|
-| dockless | StaticTSP 3 h | +2.23 ± 0.13 | 1,386 | 2.66 | 7.1 |
-| dockless | StaticTSP 1 h | +1.83 ± 0.18 | 1,136 | 3.00 | 9.0 |
-| dockless | GreedyDeficit | +2.16 ± 0.11 | 1,340 | 2.98 | 7.8 |
-| dockless | GreedyDeficit + swaps | +2.12 ± 0.10 | 1,317 | 3.03 | 7.7 |
-| docked | StaticTSP 3 h | +1.61 ± 0.11 | 745 | 4.77 | 3.4 |
-| docked | StaticTSP 1 h | +1.66 ± 0.05 | 766 | 4.59 | 4.8 |
-| docked | GreedyDeficit | +2.05 ± 0.16 | 946 | 4.31 | 4.5 |
-| docked | GreedyDeficit + swaps | +2.00 ± 0.11 | 922 | 4.42 | 4.3 |
+| mode | controller | Δ served (pp) | extra trips served | cost per extra trip (USD) | kWh per shift | bikes moved per van km |
+|---|---|---|---|---|---|---|
+| dockless | StaticTSP 3 h | +2.35 ± 0.12 | 1,468 | 1.76 | 37 | 6.2 |
+| dockless | StaticTSP 1 h | +1.95 ± 0.11 | 1,212 | 1.98 | 30 | 7.9 |
+| dockless | GreedyDeficit | +2.20 ± 0.09 | 1,370 | 1.99 | 36 | 6.9 |
+| dockless | GreedyDeficit + swaps | +2.31 ± 0.09 | 1,452 | 1.87 | 35 | 7.0 |
+| docked | StaticTSP 3 h | +1.58 ± 0.07 | 729 | 3.38 | 51 | 3.4 |
+| docked | StaticTSP 1 h | +1.66 ± 0.05 | 764 | 3.24 | 42 | 4.6 |
+| docked | GreedyDeficit | +1.96 ± 0.08 | 902 | 3.07 | 48 | 4.4 |
+| docked | GreedyDeficit + swaps | +1.95 ± 0.14 | 902 | 3.07 | 48 | 4.4 |
 
 ## Findings
 
-1. **Every baseline beats doing nothing, by about 2 points of service**, with one van:
-   - dockless: 78.1 % → 80.3 % (StaticTSP 3 h), 80.2 % (Greedy);
-   - docked: 95.1 % → 96.7 % (StaticTSP), 97.1 % (Greedy).
+1. **Every baseline beats doing nothing by about 2 points of service** with one van working 06:00–22:00:
+   - dockless: 78.1 % → 80.4 % (StaticTSP 3 h, Greedy with swaps), 80.3 % (Greedy);
+   - docked: 95.1 % → 96.7 % (StaticTSP 3 h), 97.0 % (Greedy).
 
-   Paired by seed the gains are precise (± 0.1–0.2 points): about 1,300–1,400 extra trips served
-   per week dockless and 750–950 docked.
-2. **Greedy is the best baseline in docked mode** (+2.05 points, 20 % fewer redirects than doing
-   nothing). In dockless mode it ties with the 3-hourly StaticTSP. Replanning every hour does not
-   help StaticTSP dockless (+1.8): plans are cut short before the far zones are served.
-3. **Cost.** The van costs USD 3,400–4,100 a week (wages for working time, energy and maintenance).
-   That is USD 2.7–3.0 per extra trip dockless and 4.3–4.8 docked. Energy is 270–510 kWh a week:
-   a van never comes near its battery between depot visits (no energy flags).
+   Paired by seed the gains are precise (± 0.1 points): about 1,200–1,450 extra trips served per
+   week dockless, and 730–900 docked.
+2. **Greedy is the best baseline in docked mode**: +1.96 points and 22 % fewer redirects than doing
+   nothing. In dockless mode the 3-hourly StaticTSP (+2.35) and Greedy with swaps (+2.31) are on
+   par. Replanning every hour does not help StaticTSP dockless (+1.95): plans are cut short before
+   the far zones are served.
+3. **Cost and energy.**
+   - The van costs USD 2,400–2,800 a week: wages for working time, energy and maintenance. That is
+     USD 1.8–2.0 per extra trip dockless and 3.1–3.4 docked.
+   - It uses 30–51 kWh per shift, below its 68 kWh, and no run is flagged: the vans return to the
+     depot every night, so the always-charged assumption (D20) holds.
+   - An earlier version of the controllers never returned to the depot. Every run was then
+     flagged, with 350–500 kWh between depot visits, and the van drove a third more for the same
+     service (#161).
 4. **Battery swaps barely matter here.** With 20 % e-bikes and a 60 km range, few e-bikes run low
-   in a week (58 swaps), and low batteries are not why requests fail. Swaps will matter in longer
-   runs and with more e-bikes.
+   in a week (54–67 swaps), and low batteries are not why requests fail. Swaps will matter in
+   longer runs and with more e-bikes.
 5. **What limits dockless service is walking**, not the number of bikes per zone. Most failures are
-   users declining the walk to the nearest bike, about 22 % of city requests (spec §6.5, #32). An
-   earlier StaticTSP that dropped every bike on one node per zone served *fewer* users than doing
-   nothing. Spreading drops over the zone's busiest nodes was needed (#152). Placement within a
-   zone is where an RL agent can add the most.
-6. **Speed.** A week takes 0.4 s without operations, 2 s with StaticTSP and 16–25 s with Greedy.
-   Greedy computes a forecast at each of its ~1,000–1,300 decisions.
+   users declining the walk to the nearest bike (spec §6.5, #32).
+   - An earlier StaticTSP that dropped every bike on one node per zone served *fewer* users than
+     doing nothing. Spreading drops over the zone's busiest nodes was needed (#152).
+   - Placement within a zone is where an RL agent can add the most.
+6. **Speed.** A week takes 0.4 s without operations, 2–3 s with StaticTSP and 12–20 s with Greedy,
+   which computes a forecast at each of its 700–900 decisions.
