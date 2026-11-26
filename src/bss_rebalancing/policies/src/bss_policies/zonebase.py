@@ -7,6 +7,11 @@ docked mode), target bikes per zone from the forecast, where to stop, and the se
 * drops go to the zone's busiest node and are spread over its ``spread`` highest-demand nodes within
   ``radius_m``: putting all bikes on one node serves fewer users, who only accept short walks;
 * optional battery swaps of e-bikes below ``swap_below`` of their range in the zone.
+
+**Shifts** (``shift=(start_h, end_h)``, default 06:00–22:00; ``None``: always on). At the end of a
+shift every van goes to the depot and restocks (batteries refilled, e-bikes on board charged; the
+bikes on board are kept), and the controller does nothing until the next shift. This keeps the vans'
+always-charged assumption (D20) true: energy is then reported per shift.
 """
 
 from __future__ import annotations
@@ -15,14 +20,15 @@ import numpy as np
 
 from bss_policies.base import Controller
 from bss_policies.planning import Visit, zone_targets
-from bss_sim.commands import Drop, GoTo, PickUp, SwapBattery
+from bss_sim.commands import Drop, GoTo, PickUp, Restock, SwapBattery, ToDepot
 from bss_sim.state import ELECTRIC, PARKED
 from bss_sim.zones import grid_zones, station_zones
 
 
 class ZoneController(Controller):
     def __init__(self, zones: str = "auto", cell_m: float = 300.0, min_per_zone: int = 1, radius_m: float = 250.0,
-                 swap_below: float | None = None, spread: int = 5, horizon_h: float = 3.0):
+                 swap_below: float | None = None, spread: int = 5, horizon_h: float = 3.0,
+                 shift: tuple[float, float] | None = (6.0, 22.0)):
         if zones not in ("auto", "grid", "stations"):
             raise ValueError("zones must be 'auto', 'grid' or 'stations'")
         self.zones_kind = zones
@@ -33,11 +39,14 @@ class ZoneController(Controller):
         self.spread = spread
         self.horizon_s = horizon_h * 3600.0
         self.zones = None
+        if shift is not None and not (0 <= shift[0] < shift[1] <= 24):
+            raise ValueError("shift must be (start_h, end_h) with 0 <= start < end <= 24")
+        self.shift = shift
 
     def describe(self) -> dict:
         return {"name": self.name, "zones": self.zones.name if self.zones else self.zones_kind,
                 "min_per_zone": self.min_per_zone, "radius_m": self.radius_m, "swap_below": self.swap_below,
-                "spread": self.spread, "horizon_h": self.horizon_s / 3600}
+                "spread": self.spread, "horizon_h": self.horizon_s / 3600, "shift": self.shift}
 
     def setup_zones(self, sim) -> None:
         if self.zones is None or self.zones.node_to_zone.shape[0] != sim.scenario.n_nodes:
@@ -55,6 +64,37 @@ class ZoneController(Controller):
             cap = sim.scenario.node_capacity()
             z = self.zones.node_to_zone
             self._docks = np.bincount(z[z >= 0], weights=cap[z >= 0], minlength=self.zones.n).astype(np.int64)
+
+    # --- shifts ----------------------------------------------------------------------------
+    def setup_shifts(self, sim) -> None:
+        self.on_shift = True
+        if self.shift is None:
+            return
+        start, end = self.shift[0] * 3600.0, self.shift[1] * 3600.0
+        day = sim.now - sim.now % 86400.0
+        sec = sim.now % 86400.0
+        self.on_shift = start <= sec < end
+        nxt_end = day + end if sec < end else day + 86400.0 + end
+        nxt_start = day + start if sec < start else day + 86400.0 + start
+        sim.wakeup(at=nxt_end, tag="shift_end")
+        sim.wakeup(at=nxt_start, tag="shift_start")
+
+    def shift_events(self, sim, notes) -> tuple[bool, bool]:
+        """Handle shift timers; returns (a shift ended now, a shift started now)."""
+        ended = started = False
+        for n in notes:
+            if n.kind != "wakeup":
+                continue
+            tag = n.data.get("tag")
+            if tag == "shift_end":
+                ended, self.on_shift = True, False
+                for tv in sim.observe().trucks:
+                    sim.submit(tv.id, [ToDepot(), Restock()], replace=True)
+                sim.wakeup(after=86400.0, tag="shift_end")
+            elif tag == "shift_start":
+                started, self.on_shift = True, True
+                sim.wakeup(after=86400.0, tag="shift_start")
+        return ended, started
 
     def surplus(self, sim, obs, horizon_s: float | None = None) -> np.ndarray:
         """Bikes per zone minus target (> 0: bikes to take away, < 0: bikes to bring)."""

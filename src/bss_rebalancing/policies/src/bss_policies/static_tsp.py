@@ -33,14 +33,17 @@ class StaticTSP(ZoneController):
 
     def reset(self, sim) -> None:
         self.setup_zones(sim)
+        self.setup_shifts(sim)
         self.plans = 0
         day_s = sim.now % 86400.0
         k = np.ceil((day_s - self.first_s) / self.every_s)
         sim.wakeup(at=sim.now - day_s + self.first_s + max(k, 0) * self.every_s, tag="rebalance")
 
     def act(self, sim, notes) -> None:
+        self.shift_events(sim, notes)
         if any(n.kind == "wakeup" and n.data.get("tag") == "rebalance" for n in notes):
-            self.rebalance(sim)
+            if self.on_shift:
+                self.rebalance(sim)
             sim.wakeup(after=self.every_s, tag="rebalance")
 
     def rebalance(self, sim) -> None:
@@ -52,8 +55,11 @@ class StaticTSP(ZoneController):
             if not surplus.any():
                 break
             T = sim.expected_drive_times(np.append(stop, tv.stop), stop)
+            budget = self.every_s
+            if self.shift is not None:      # finish before the end of the shift
+                budget = min(budget, self.shift[1] * 3600.0 - sim.now % 86400.0)
             route = plan_route(surplus, T, tc.capacity, tv.load, tc.pickup_per_bike_s, tc.drop_per_bike_s,
-                               tc.stop_overhead_s, time_budget_s=self.every_s)
+                               tc.stop_overhead_s, time_budget_s=budget)
             cmds = []
             for v in route:
                 cmds += self.commands(sim, obs, v, stop[v.zone], tv.stock)

@@ -108,7 +108,7 @@ def test_greedy_cools_down_zones_where_nothing_could_be_done(bundle):
 
     sim = make(bundle, debug=False)
     g = GreedyDeficit(cooldown_s=1800)
-    sim.reset(seed=6, start=START)
+    sim.reset(seed=6, start="2024-09-17T08:00")            # within the shift
     g.reset(sim)
     g.claims[0] = (3, 5)                                   # truck 0 was sent to take 5 bikes in zone 3
     failed = CommandResult(0, PickUp(5), 5, 0, sim.now, sim.now, "not_enough_bikes")
@@ -123,3 +123,23 @@ def test_bad_zone_kind():
         StaticTSP(zones="hexagons")
     with pytest.raises(ValueError):
         StaticTSP(every_h=0)
+
+
+@pytest.mark.parametrize("make_controller", [lambda: StaticTSP(every_h=2), lambda: GreedyDeficit()])
+def test_shifts_send_vans_to_the_depot_overnight(bundle, make_controller):
+    sim = make(bundle, debug=False)
+    rec = Recorder(make_controller())
+    res = run_episode(sim, rec, seed=7, start="2024-09-17T00:00", duration_s=2 * 86400)
+    for t, _, cmds, _ in rec.submitted:
+        sec = t % 86400
+        names = [type(c).__name__ for c in cmds]
+        if names == ["ToDepot", "Restock"]:
+            assert sec == 22 * 3600
+        else:
+            assert 6 * 3600 <= sec < 22 * 3600, (t, names)    # nothing else outside the shift
+    assert res.kpis["energy_flags"] == 0
+    tk = sim.truck_kpis(0)
+    assert tk["kwh_since_depot"] < 0.1 and sim.trucks[0].stop == sim.depot_stop   # only the restock at the depot
+    assert res.controller["shift"] == (6.0, 22.0)
+    with pytest.raises(ValueError):
+        StaticTSP(shift=(22, 6))

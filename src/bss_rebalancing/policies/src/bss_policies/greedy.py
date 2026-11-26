@@ -38,6 +38,7 @@ class GreedyDeficit(ZoneController):
         self.claims: dict[int, tuple[int, int]] = {}    # truck -> (zone, qty) it is heading to do
         self.cooldown: dict[int, float] = {}            # zone -> until when it is left alone
         self.visits = 0
+        self.setup_shifts(sim)
 
     def act(self, sim, notes) -> None:
         for n in notes:                                  # a service that achieved nothing: cool the zone down
@@ -47,7 +48,15 @@ class GreedyDeficit(ZoneController):
                     claim = self.claims.get(r.truck)
                     if claim is not None:
                         self.cooldown[claim[0]] = sim.now + self.cooldown_s
-        idle = sorted({n.data["truck"] for n in notes if n.kind == "truck_idle"})
+        ended, started = self.shift_events(sim, notes)
+        if ended:
+            self.claims.clear()
+        if not self.on_shift:
+            return
+        idle = {n.data["truck"] for n in notes if n.kind == "truck_idle"}
+        if started:                                      # the vans waited at the depot: all available
+            idle |= {tv.id for tv in sim.observe().trucks if not tv.busy}
+        idle = sorted(idle)
         if not idle:
             return
         obs = sim.observe()
