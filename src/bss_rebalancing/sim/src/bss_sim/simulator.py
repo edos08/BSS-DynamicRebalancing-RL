@@ -27,6 +27,7 @@ stream keyed by the slot, so they do not depend on what happened before.
 from __future__ import annotations
 
 import datetime as dt
+import heapq
 import json
 import math
 from pathlib import Path
@@ -177,10 +178,17 @@ class Simulator:
         self._notes: list[Notification] = []
         self._wake_tags: list = []
         n = cfg.fleet.size + cfg.external.reservoir
-        self._trip_dest = np.full(n, -1, dtype=np.int64)
-        self._trip_km = np.zeros(n)
-        self._trip_ride = np.zeros(n)
-        self._trip_req = np.full(n, -1, dtype=np.int64)
+        # per-bike current trip (Python lists: scalar access on the hot path)
+        self._trip_dest: list[int] = [-1] * n
+        self._trip_km: list[float] = [0.0] * n
+        self._trip_ride: list[float] = [0.0] * n
+        self._trip_req: list[int] = [-1] * n
+        # configuration scalars read on the hot path
+        self._ext_km = cfg.energy.external_trip_km
+        self._rt_speed = cfg.energy.round_trip_speed_mps
+        self._ext_ride = cfg.external.ride_time_s
+        self._walk_speed = cfg.users.walking_speed_mps
+        self._bat_lo, self._bat_hi = cfg.fleet.initial_battery
         self._req_id = 0
         self._slot = int(self.now // 3600)
         self._rq: list[tuple] = []
@@ -304,9 +312,13 @@ class Simulator:
         n = int(keep.sum())
         rng = np.random.default_rng([self._user_seed, USER_SLOT_STREAM, k])
         u = rng.random(len(t))[keep]
+        o, d = req.o_node[keep], req.d_node[keep]
+        inside = (o >= 0) & (d >= 0)
+        dist_m = np.zeros(n)
+        dist_m[inside] = self._dist[o[inside], d[inside]]
         self._rq = list(zip(t[keep].tolist(), req.o_place[keep].tolist(), req.d_place[keep].tolist(),
-                            req.o_node[keep].tolist(), req.d_node[keep].tolist(), req.ride_time_s[keep].tolist(),
-                            req.kind[keep].tolist(), u.tolist()))
+                            o.tolist(), d.tolist(), req.ride_time_s[keep].tolist(),
+                            req.kind[keep].tolist(), u.tolist(), dist_m.tolist()))
         self._ri, self._rn = 0, n
 
     def run(self, until: Until) -> list[Notification]:
@@ -316,31 +328,35 @@ class Simulator:
         if deadline == math.inf and not kinds:
             raise ValueError("run(until=...) needs a time limit or a notification to stop on")
         heap = self.queue._heap
+        pop = heapq.heappop
         debug = self.config.debug
+        request, trip_start, trip_end = self._request, self._trip_start, self._trip_end
+        rq, ri, rn = self._rq, self._ri, self._rn
         stop = False
         while not stop:
-            th = heap[0][0] if heap else math.inf
-            if self._ri < self._rn:
-                tr = self._rq[self._ri][0]
-                if tr < th or (tr == th and heap[0][1] > TRIP_REQUEST):
+            if ri < rn:  # next request of the current slot, unless a queued event comes first
+                r = rq[ri]
+                tr = r[0]
+                if not heap or tr < heap[0][0] or (tr == heap[0][0] and heap[0][1] > TRIP_REQUEST):
                     if tr > deadline:
                         break
                     self.now = tr
-                    self._request(self._ri)
-                    self._ri += 1
+                    ri += 1
+                    request(r)
                     if debug:
                         self.check_invariants()
                     continue
-            if th > deadline:
+            if not heap or heap[0][0] > deadline:
                 break
-            t, _, _, kind, a, b = self.queue.pop()
+            t, _, _, kind, a, b = pop(heap)
             self.now = t
             if kind == TRIP_END:
-                self._trip_end(a)
+                trip_end(a)
             elif kind == TRIP_START:
-                self._trip_start(a)
-            elif kind == SLOT_START:
+                trip_start(a)
+            elif kind == SLOT_START:  # the previous slot's requests are all before this time
                 self._load_slot(a)
+                rq, ri, rn = self._rq, 0, self._rn
                 self.queue.push((a + 1) * 3600.0, SLOT_START, a + 1)
             elif kind == SNAPSHOT:
                 self._snap_t.append(t)
@@ -353,6 +369,7 @@ class Simulator:
                     stop = True
             if debug:
                 self.check_invariants()
+        self._ri = ri
         if not stop and deadline != math.inf:
             self.now = max(self.now, deadline)
         notes, self._notes = self._notes, []
@@ -367,8 +384,8 @@ class Simulator:
         if self.log is not None:
             self.log.append((self.now, TRIP_REQUEST, rid, -1, node, reason, self._last_walk))
 
-    def _request(self, i: int) -> None:
-        t, op, dp, on, dn, ride, pref, u = self._rq[i]
+    def _request(self, r: tuple) -> None:
+        t, op, dp, on, dn, ride, pref, u, dist_m = r
         rid = self._req_id
         self._req_id += 1
         k = self.kpis_
@@ -384,25 +401,23 @@ class Simulator:
                 self._fail(rid, dn, EXTERNAL_EMPTY)
                 return
             if f.kind_l[bike] == ELECTRIC:  # charged outside the city: fresh draw
-                lo, hi = self.config.fleet.initial_battery
-                f.battery_km[bike] = self._ext_rng.uniform(lo, hi) * self.battery.range_km
+                f._batt[bike] = self._ext_rng.uniform(self._bat_lo, self._bat_hi) * self.battery.range_km
             k.served += 1
             k.from_external += 1
             self._trip_dest[bike] = dn
-            self._trip_km[bike] = self.config.energy.external_trip_km
+            self._trip_km[bike] = self._ext_km
             self._trip_req[bike] = rid
-            ride = ride if ride == ride else self.config.external.ride_time_s  # nan -> default
+            if ride != ride:  # nan -> default delay from outside
+                ride = self._ext_ride
             self._trip_ride[bike] = ride
             if self.log is not None:
                 self.log.append((t, TRIP_REQUEST, rid, bike, dn, SERVED, 0.0))
             self.queue.push(t + ride, TRIP_END, bike)
             return
+        to_ext = dp == ext
         if ride != ride:  # in-city trip without a ride time (no distances loaded): typical pace
-            ride = float(self._dist[on, dn]) / self.config.energy.round_trip_speed_mps if dp != ext else 0.0
-        if dp == ext:
-            trip_km = self.config.energy.external_trip_km
-        else:
-            trip_km = float(self._dist[on, dn]) / 1000.0
+            ride = 0.0 if to_ext else dist_m / self._rt_speed
+        trip_km = self._ext_km if to_ext else dist_m / 1000.0
         k.city_requests += 1
         for p in self._parts.values():
             p.requests[p._g[on]] += 1
@@ -413,35 +428,37 @@ class Simulator:
         k.served += 1
         k.city_served += 1
         k.walk_hist.add(walk)
-        if walk > 0.0:
-            k.walk_m_sum += walk
-            k.walked += 1
         node = f.unpark(bike, RESERVED)
-        if dp != ext:
-            trip_km = float(self._dist[node, dn]) / 1000.0
+        if not to_ext:
+            if walk > 0.0:  # the bike is not at the origin node: distance from where it is
+                trip_km = float(self._dist[node, dn]) / 1000.0
             if op == dp:  # round trip by place: distance from the ride time at a typical pace
-                trip_km = max(trip_km, ride * self.config.energy.round_trip_speed_mps / 1000.0)
-        self._trip_dest[bike] = dn if dp != ext else -1
+                trip_km = max(trip_km, ride * self._rt_speed / 1000.0)
+        self._trip_dest[bike] = -1 if to_ext else dn
         self._trip_km[bike] = trip_km
         self._trip_ride[bike] = ride
         self._trip_req[bike] = rid
         if self.log is not None:
             self.log.append((t, TRIP_REQUEST, rid, bike, node, SERVED, walk))
-        self.queue.push(t + walk / self.config.users.walking_speed_mps, TRIP_START, bike)
+        if walk > 0.0:
+            k.walk_m_sum += walk
+            k.walked += 1
+            self.queue.push(t + walk / self._walk_speed, TRIP_START, bike)
+        else:  # no walk: the trip starts now (same order as a TripStart event at time t)
+            self._trip_start(bike)
 
     def _trip_start(self, bike: int) -> None:
         f = self.fleet
         if f.kind_l[bike] == ELECTRIC:
-            before = f.battery_km[bike]
-            f.battery_km[bike] = self.battery.after_ride(before, self._trip_km[bike])
+            f._batt[bike] = self.battery.after_ride(f._batt[bike], self._trip_km[bike])
             self.kpis_.ebike_km += self._trip_km[bike]
         if self._parts or self.log is not None:
-            node = int(f.node[bike])  # where the bike was taken (kept after unpark)
+            node = f._node[bike]  # where the bike was taken (kept after unpark)
             for p in self._parts.values():
                 p.departures[p._g[node]] += 1
             if self.log is not None:
-                self.log.append((self.now, TRIP_START, int(self._trip_req[bike]), bike, node, SERVED,
-                                 float(self._trip_ride[bike]) if self._trip_dest[bike] >= 0 else 0.0))
+                self.log.append((self.now, TRIP_START, self._trip_req[bike], bike, node, SERVED,
+                                 self._trip_ride[bike] if self._trip_dest[bike] >= 0 else 0.0))
         if self._trip_dest[bike] < 0:  # to outside: the bike leaves the city now
             self.kpis_.to_external += 1
             f.to_external(bike)
@@ -451,21 +468,21 @@ class Simulator:
         self.queue.push(self.now + self._trip_ride[bike], TRIP_END, bike)
 
     def _trip_end(self, bike: int) -> None:
-        node = int(self._trip_dest[bike])
-        if self._docked and self.fleet.n_bikes[node] >= self._cap[node] and self._redirect(bike, node):
+        node = self._trip_dest[bike]
+        if self._docked and self.fleet._nb[node] >= self._cap[node] and self._redirect(bike, node):
             return
         self.fleet.park(bike, node)
         self.kpis_.trips_ended += 1
         for p in self._parts.values():
             p.arrivals[p._g[node]] += 1
         if self.log is not None:
-            self.log.append((self.now, TRIP_END, int(self._trip_req[bike]), bike, node, SERVED, 0.0))
+            self.log.append((self.now, TRIP_END, self._trip_req[bike], bike, node, SERVED, 0.0))
 
     def _redirect(self, bike: int, node: int) -> bool:
         """Docked mode, ``node`` full: ride on to the nearest station with a free dock.
 
         Returns False when every station is full (the bike is then left at ``node``)."""
-        nb, cap = self.fleet.n_bikes, self._cap
+        nb, cap = self.fleet._nb, self._cap
         for alt, extra_m in self._dock_order[node]:
             if nb[alt] < cap[alt]:
                 break
@@ -481,7 +498,7 @@ class Simulator:
         k.ride_km += extra_km
         f = self.fleet
         if f.kind_l[bike] == ELECTRIC:
-            f.battery_km[bike] = self.battery.after_ride(f.battery_km[bike], extra_km)
+            f._batt[bike] = self.battery.after_ride(f._batt[bike], extra_km)
             k.ebike_km += extra_km
         trip_m, ride = self._trip_km[bike] * 1000.0, self._trip_ride[bike]
         speed = trip_m / ride if trip_m > 0 and ride > 0 else REDIRECT_FALLBACK_SPEED_MPS
@@ -489,7 +506,7 @@ class Simulator:
         self._trip_km[bike] = extra_km
         self._trip_ride[bike] = extra_m / speed
         if self.log is not None:
-            self.log.append((self.now, REDIRECT, int(self._trip_req[bike]), bike, alt,
+            self.log.append((self.now, REDIRECT, self._trip_req[bike], bike, alt,
                              NO_DOCK if extra_m > self.config.users.redirect_radius_m else SERVED, extra_m))
         self.queue.push(self.now + extra_m / speed, TRIP_END, bike)
         return True

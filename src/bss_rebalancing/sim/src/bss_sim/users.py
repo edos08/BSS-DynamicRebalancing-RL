@@ -57,7 +57,7 @@ class WalkingUsers:
     def choose(self, o: int, preferred: int, need_km: float, u: float) -> tuple[int, float, int]:
         """``(bike, walk_m, SERVED)`` or ``(-1, walk_m, reason)``; ``u`` is the user's uniform draw."""
         f = self.fleet
-        nxt, kind, batt = f.nxt, f.kind_l, f.battery_km
+        nxt, kind, batt = f.nxt, f.kind_l, f._batt
         ok_empty = self.rideable_empty
         first, first_w = -1, 0.0
         if self.tol == 0.0:  # fast path: a usable bike at the origin node itself (walk 0)
