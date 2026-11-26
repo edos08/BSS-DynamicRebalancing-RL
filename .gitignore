@@ -14,7 +14,7 @@ data*/
 !data/utils/ev_velocity_matrix.csv
 
 assets/
-gym/
+/gym/
 graph_images/
 plots/
 dummy_file.py
