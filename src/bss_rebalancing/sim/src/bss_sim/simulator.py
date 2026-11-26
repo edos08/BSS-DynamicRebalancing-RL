@@ -27,6 +27,7 @@ stream keyed by the slot, so they do not depend on what happened before.
 from __future__ import annotations
 
 import datetime as dt
+import json
 import math
 from pathlib import Path
 
@@ -35,11 +36,12 @@ import numpy as np
 from bss_sim.config import SimConfig
 from bss_sim.demand import PoissonDemand, ReplayDemand
 from bss_sim.energy import Battery
-from bss_sim.engine import (REDIRECT, SLOT_START, TRIP_END, TRIP_REQUEST, TRIP_START, WAKEUP, EventQueue,
-                            Notification, Until)
+from bss_sim.engine import (REDIRECT, SLOT_START, SNAPSHOT, TRIP_END, TRIP_REQUEST, TRIP_START, WAKEUP,
+                            EventQueue, Notification, Until)
 from bss_sim.partitions import Partition, PartitionCounts
 from bss_sim.rng import Streams
 from bss_sim.scenario import Scenario
+from bss_sim import telemetry
 from bss_sim.state import ELECTRIC, RESERVED, RIDING, Fleet, initial_nodes
 from bss_sim.users import EXTERNAL_EMPTY, NO_DOCK, REASONS, REQUEST_FAILURES, SERVED, WalkingUsers
 
@@ -58,7 +60,8 @@ def _parse_start(start) -> dt.datetime:
 class Kpis:
     """Counters always kept in memory (spec §11)."""
 
-    def __init__(self):
+    def __init__(self, walk_radius_m: float = 400.0):
+        self.walk_hist = telemetry.WalkHistogram(walk_radius_m)
         self.requests = 0                 # all requests, including from outside
         self.city_requests = 0            # requests starting in the city
         self.city_served = 0
@@ -87,8 +90,10 @@ class Kpis:
             "service_level": self.served / max(self.served + n_fail, 1),
             "city_requests": self.city_requests,
             "city_service_level": self.city_served / max(self.city_requests, 1),
-            "walk_m_mean": self.walk_m_sum / max(self.served, 1),
-            "walked_share": self.walked / max(self.served, 1),
+            "walk_m_mean": self.walk_m_sum / max(self.city_served, 1),   # users served in the city
+            "walked_share": self.walked / max(self.city_served, 1),
+            "walk_m_p50": self.walk_hist.quantile(0.5),
+            "walk_m_p90": self.walk_hist.quantile(0.9),
             "trips_ended": self.trips_ended,
             "ride_km": self.ride_km,
             "ebike_km": self.ebike_km,
@@ -165,7 +170,9 @@ class Simulator:
             part.bind(self.fleet)
 
         self.queue = EventQueue()
-        self.kpis_ = Kpis()
+        self.kpis_ = Kpis(cfg.users.walk_radius_m)
+        self._snap_t: list[float] = []
+        self._snap: list[np.ndarray] = []
         self.log = [] if cfg.telemetry.event_log else None
         self._notes: list[Notification] = []
         self._wake_tags: list = []
@@ -180,6 +187,8 @@ class Simulator:
         self._ri = 0
         self._rn = 0
         self.queue.push(self._slot * 3600.0, SLOT_START, self._slot)
+        if cfg.telemetry.snapshot_every_s:
+            self.queue.push(self.now, SNAPSHOT)
         return []
 
     def _init_fleet(self, snapshot) -> None:
@@ -257,13 +266,34 @@ class Simulator:
             assert np.maximum(nb - cap, 0).sum() <= self.kpis_.dock_overflow, "docked mode: station over capacity"
 
     def event_log(self) -> dict[str, np.ndarray]:
-        """The event log as arrays (``telemetry.event_log`` must be on)."""
+        """The event log as arrays (``telemetry.event_log`` must be on); columns in :mod:`bss_sim.telemetry`."""
         if self.log is None:
             raise RuntimeError("event log disabled (telemetry.event_log: false)")
-        cols = list(zip(*self.log)) if self.log else [()] * 6
-        return {"t": np.array(cols[0], dtype=np.float64), "event": np.array(cols[1], dtype=np.uint8),
-                "request": np.array(cols[2], dtype=np.int64), "bike": np.array(cols[3], dtype=np.int32),
-                "node": np.array(cols[4], dtype=np.int32), "outcome": np.array(cols[5], dtype=np.int8)}
+        return telemetry.to_arrays(self.log)
+
+    def snapshots(self) -> tuple[np.ndarray, np.ndarray]:
+        """Times [K] and parked bikes per node [K, nodes] (``telemetry.snapshot_every_s``)."""
+        n = self.scenario.n_nodes
+        return (np.array(self._snap_t, dtype=np.float64),
+                np.array(self._snap, dtype=np.int16).reshape(len(self._snap), n))
+
+    def metadata(self) -> dict:
+        """What identifies this run: bundle, config (and hash), seed, start, versions."""
+        import bss_sim
+        return {"bundle_id": self.scenario.bundle_id, "bundle": str(self.scenario.root),
+                "config": self.config.to_dict(), "config_hash": self.config.config_hash(),
+                "seed": self.seed, "start": self.start.isoformat(), "clock_s": self.now,
+                "bss_sim": bss_sim.__version__, "numpy": np.__version__}
+
+    def save_log(self, path: str | Path) -> Path:
+        """Write the event log (``.npz`` or ``.parquet``) and, if any, the snapshots next to it
+        (``<name>.snapshots.npz``); the metadata is embedded in both."""
+        path = telemetry.save_events(path, self.event_log(), self.metadata())
+        if self._snap:
+            t, bikes = self.snapshots()
+            np.savez_compressed(path.with_name(path.stem + ".snapshots.npz"), t=t, bikes=bikes,
+                                metadata=np.array(json.dumps(self.metadata(), sort_keys=True)))
+        return path
 
     # ---------------------------------------------------------------------------------- loop
     def _load_slot(self, k: int) -> None:
@@ -312,6 +342,10 @@ class Simulator:
             elif kind == SLOT_START:
                 self._load_slot(a)
                 self.queue.push((a + 1) * 3600.0, SLOT_START, a + 1)
+            elif kind == SNAPSHOT:
+                self._snap_t.append(t)
+                self._snap.append(self.fleet.n_bikes.astype(np.int16))
+                self.queue.push(t + self.config.telemetry.snapshot_every_s, SNAPSHOT)
             elif kind == WAKEUP:
                 note = Notification(t, "wakeup", {"tag": self._wake_tags[a]})
                 self._notes.append(note)
@@ -325,12 +359,13 @@ class Simulator:
         return notes
 
     # -------------------------------------------------------------------------------- events
-    def _fail(self, rid: int, node: int, reason: int) -> None:
+    def _fail(self, rid: int, node: int, reason: int, walk: float = 0.0) -> None:
+        self._last_walk = walk
         self.kpis_.failures[reason] += 1
         for p in self._parts.values():
             p.failures[p._g[node]][reason] += 1
         if self.log is not None:
-            self.log.append((self.now, TRIP_REQUEST, rid, -1, node, reason))
+            self.log.append((self.now, TRIP_REQUEST, rid, -1, node, reason, self._last_walk))
 
     def _request(self, i: int) -> None:
         t, op, dp, on, dn, ride, pref, u = self._rq[i]
@@ -359,7 +394,7 @@ class Simulator:
             ride = ride if ride == ride else self.config.external.ride_time_s  # nan -> default
             self._trip_ride[bike] = ride
             if self.log is not None:
-                self.log.append((t, TRIP_REQUEST, rid, bike, dn, SERVED))
+                self.log.append((t, TRIP_REQUEST, rid, bike, dn, SERVED, 0.0))
             self.queue.push(t + ride, TRIP_END, bike)
             return
         if ride != ride:  # in-city trip without a ride time (no distances loaded): typical pace
@@ -373,10 +408,11 @@ class Simulator:
             p.requests[p._g[on]] += 1
         bike, walk, reason = self.users.choose(on, pref, self.battery.need_km(trip_km), u)
         if bike < 0:
-            self._fail(rid, on, reason)
+            self._fail(rid, on, reason, walk)
             return
         k.served += 1
         k.city_served += 1
+        k.walk_hist.add(walk)
         if walk > 0.0:
             k.walk_m_sum += walk
             k.walked += 1
@@ -390,7 +426,7 @@ class Simulator:
         self._trip_ride[bike] = ride
         self._trip_req[bike] = rid
         if self.log is not None:
-            self.log.append((t, TRIP_REQUEST, rid, bike, node, SERVED))
+            self.log.append((t, TRIP_REQUEST, rid, bike, node, SERVED, walk))
         self.queue.push(t + walk / self.config.users.walking_speed_mps, TRIP_START, bike)
 
     def _trip_start(self, bike: int) -> None:
@@ -404,7 +440,8 @@ class Simulator:
             for p in self._parts.values():
                 p.departures[p._g[node]] += 1
             if self.log is not None:
-                self.log.append((self.now, TRIP_START, int(self._trip_req[bike]), bike, node, SERVED))
+                self.log.append((self.now, TRIP_START, int(self._trip_req[bike]), bike, node, SERVED,
+                                 float(self._trip_ride[bike]) if self._trip_dest[bike] >= 0 else 0.0))
         if self._trip_dest[bike] < 0:  # to outside: the bike leaves the city now
             self.kpis_.to_external += 1
             f.to_external(bike)
@@ -422,7 +459,7 @@ class Simulator:
         for p in self._parts.values():
             p.arrivals[p._g[node]] += 1
         if self.log is not None:
-            self.log.append((self.now, TRIP_END, int(self._trip_req[bike]), bike, node, SERVED))
+            self.log.append((self.now, TRIP_END, int(self._trip_req[bike]), bike, node, SERVED, 0.0))
 
     def _redirect(self, bike: int, node: int) -> bool:
         """Docked mode, ``node`` full: ride on to the nearest station with a free dock.
@@ -453,6 +490,6 @@ class Simulator:
         self._trip_ride[bike] = extra_m / speed
         if self.log is not None:
             self.log.append((self.now, REDIRECT, int(self._trip_req[bike]), bike, alt,
-                             NO_DOCK if extra_m > self.config.users.redirect_radius_m else SERVED))
+                             NO_DOCK if extra_m > self.config.users.redirect_radius_m else SERVED, extra_m))
         self.queue.push(self.now + extra_m / speed, TRIP_END, bike)
         return True
