@@ -105,6 +105,9 @@ data/scenarios/cambridge-2024/
 │   ├── drive_nodes.parquet    # drive network without busways
 │   ├── drive_edges.parquet    # + speed_kmh, speed_source, freeflow_s
 │   ├── drive_time.npy         # float32 [M, M] free-flow driving time (s), one-way streets respected
+│   ├── drive_dist.npy         # float32 [M, M] length (m) of those fastest paths
+│   ├── drive_time_by_class.npy # float32 [3, M, M] their free-flow time on major / secondary / local roads
+│   ├── drive_nodes.npz        # drive node coordinates for the simulator (osm_id, lat, lon, x, y)
 │   ├── bike_to_drive.npz      # node: nearest drive node of each bike node; dist_m
 │   └── network_report.json
 ├── stations/

@@ -4,6 +4,7 @@ import polars as pl
 import pytest
 
 from bss_scenario.network import Neighbours, Projection, adjacency, all_pairs, walk_neighbours
+from bss_scenario.network.paths import path_sums
 from bss_scenario.network.graph import EDGE_SCHEMA, NODE_SCHEMA, Network
 
 
@@ -62,3 +63,32 @@ def test_neighbours_roundtrip(tmp_path):
     assert back.max_radius_m == 120
     for a, b in ((nb.indptr, back.indptr), (nb.indices, back.indices), (nb.dist, back.dist)):
         np.testing.assert_array_equal(a, b)
+
+
+def test_path_sums_follow_the_fastest_path():
+    # 0 -> 1 -> 2 is fast but long; 0 -> 2 direct is short but slow; a parallel slow edge 0 -> 1 is ignored
+    edges = [(0, 1, 1000), (1, 2, 1000), (0, 2, 500), (2, 0, 500), (1, 0, 1000), (2, 1, 1000), (0, 1, 50)]
+    net = make_net(edges, 3)
+    time_s = np.array([10.0, 10.0, 100.0, 100.0, 10.0, 10.0, 99.0])
+    cls = np.array([0, 1, 1, 1, 0, 0, 1])
+    t, sums = path_sums(net, time_s, {"len": net.edges["length_m"].to_numpy(),
+                                      "c0": np.where(cls == 0, time_s, 0), "c1": np.where(cls == 1, time_s, 0)})
+    np.testing.assert_array_equal(t, all_pairs(net, time_s))
+    assert t[0, 2] == 20 and sums["len"][0, 2] == 2000          # via node 1
+    assert sums["c0"][0, 2] == 10 and sums["c1"][0, 2] == 10
+    np.testing.assert_allclose(sums["c0"] + sums["c1"], t)
+    assert sums["len"][2, 0] == 2000 and t[2, 0] == 20           # 2 -> 1 -> 0
+    rng = np.random.default_rng(0)                               # random graph vs networkx path lengths
+    n = 30
+    e = [(i, (i + 1) % n, 50.0) for i in range(n)] + [(int(a), int(b), float(rng.uniform(10, 300)))
+                                                        for a, b in rng.integers(0, n, (80, 2)) if a != b]
+    net = make_net(e, n)
+    w = rng.uniform(1, 20, len(e))
+    t, sums = path_sums(net, w, {"len": net.edges["length_m"].to_numpy()})
+    g = nx.DiGraph()
+    for (a, b, length), wi in sorted(zip(e, w), key=lambda z: -z[1]):
+        g.add_edge(a, b, w=wi, length=length)
+    for src in (0, 7, 19):
+        paths = nx.single_source_dijkstra_path(g, src, weight="w")
+        for dst, path in paths.items():
+            assert sums["len"][src, dst] == pytest.approx(sum(g[a][b]["length"] for a, b in zip(path, path[1:])), rel=1e-5)

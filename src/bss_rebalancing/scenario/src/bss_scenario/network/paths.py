@@ -2,6 +2,8 @@
 
 * :func:`all_pairs` — dense ``float32 [N, N]`` directed shortest paths (metres or seconds), so the
   simulator looks distances up instead of searching graphs.
+* :func:`path_sums` — the same fastest paths, plus sums of other edge attributes along them
+  (e.g. length, or time on each road class), without new searches per attribute.
 * :func:`walk_neighbours` — for every node, the nodes within walking reach, sorted by walking
   distance, as CSR arrays. Pedestrians ignore one-way restrictions, so walking uses the
   undirected network. Built up to ``max_radius_m``; the user model applies its own (smaller)
@@ -50,6 +52,47 @@ def all_pairs(net: Network, weight: str | np.ndarray = "length_m") -> np.ndarray
     if not np.isfinite(out).all():
         raise ValueError("network is not strongly connected (infinite distances)")
     return out
+
+
+def path_sums(net: Network, weight: str | np.ndarray, extras: dict[str, np.ndarray]) -> tuple[np.ndarray, dict]:
+    """Shortest paths by ``weight`` and, for each extra edge attribute, its sum along those paths.
+
+    Between parallel edges the one with the smallest ``weight`` is used, as in :func:`adjacency`.
+    Sums are accumulated down each source's shortest-path tree, one tree level per step
+    (``acc[v] = acc[pred[v]] + x(pred[v], v)``), vectorised over a chunk of sources.
+    Returns ``(float32 [N, N] weight, {name: float32 [N, N]})``.
+    """
+    w = net.edges[weight].to_numpy() if isinstance(weight, str) else np.asarray(weight, dtype=float)
+    u, v = net.edges["u"].to_numpy(), net.edges["v"].to_numpy()
+    order = np.argsort(-w, kind="stable")  # assign heaviest first: the lightest parallel edge wins
+    dense = {}
+    for name, x in extras.items():
+        m = np.zeros((net.n, net.n))
+        m[u[order], v[order]] = np.asarray(x, dtype=float)[order]
+        dense[name] = m
+    graph = adjacency(net, w)
+    out = np.empty((net.n, net.n), dtype=np.float32)
+    sums = {name: np.empty((net.n, net.n), dtype=np.float32) for name in extras}
+    for start in range(0, net.n, CHUNK):
+        rows = np.arange(start, min(start + CHUNK, net.n))
+        d, pred = dijkstra(graph, directed=True, indices=rows, return_predecessors=True)
+        if not np.isfinite(d).all():
+            raise ValueError("network is not strongly connected (infinite distances)")
+        out[rows] = d
+        r = np.arange(len(rows))[:, None]
+        has = pred >= 0
+        p = np.where(has, pred, 0)
+        cols = np.broadcast_to(np.arange(net.n), pred.shape)
+        for name, m in dense.items():
+            step = np.where(has, m[p, cols], 0.0)
+            acc = np.zeros_like(step)
+            for _ in range(net.n):  # at most N tree levels; usually a few dozen
+                new = np.where(has, acc[r, p] + step, 0.0)
+                if np.array_equal(new, acc):
+                    break
+                acc = new
+            sums[name][rows] = acc
+    return out, sums
 
 
 @dataclass(frozen=True)
