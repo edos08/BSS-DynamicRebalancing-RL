@@ -37,6 +37,7 @@ import numpy as np
 from bss_sim.config import SimConfig
 from bss_sim.demand import PoissonDemand, ReplayDemand
 from bss_sim.energy import Battery
+from bss_sim.info import InFlight, Observation, TruckView, readonly
 from bss_sim.engine import (REDIRECT, SLOT_START, SNAPSHOT, TRIP_END, TRIP_REQUEST, TRIP_START, TRUCK, WAKEUP,
                             EventQueue, Notification, Until)
 from bss_sim.partitions import Partition, PartitionCounts
@@ -204,6 +205,11 @@ class Simulator:
         self._trip_km: list[float] = [0.0] * n
         self._trip_ride: list[float] = [0.0] * n
         self._trip_req: list[int] = [-1] * n
+        self._trip_oplace: list[int] = [-1] * n   # information layer: origin place and node,
+        self._trip_onode: list[int] = [-1] * n    # start and arrival times of the current trip
+        self._trip_t0: list[float] = [0.0] * n
+        self._trip_eta: list[float] = [0.0] * n
+        self.oracle_used = False
         # configuration scalars read on the hot path
         self._ext_km = cfg.energy.external_trip_km
         self._rt_speed = cfg.energy.round_trip_speed_mps
@@ -284,6 +290,44 @@ class Simulator:
         self._wake_tags.append(tag)
         self.queue.push(float(t), WAKEUP, len(self._wake_tags) - 1)
 
+    def inflight(self, level: str | None = None) -> InFlight | None:
+        """Trips in progress at the configured knowledge level (or a lower one)."""
+        level = level or self.config.info.inflight_knowledge
+        allowed = ("none", "count", "origin", "destination")
+        if allowed.index(level) > allowed.index(self.config.info.inflight_knowledge):
+            raise PermissionError(f"inflight_knowledge is {self.config.info.inflight_knowledge!r}; "
+                                  f"{level!r} is not available")
+        return self._inflight(level)
+
+    def _inflight(self, level: str) -> InFlight | None:
+        """Trips in progress at ``level`` without the permission check (for internal providers)."""
+        if level == "none":
+            return None
+        riding = np.flatnonzero(self.fleet.status == RIDING)
+        if level == "count":
+            return InFlight(len(riding))
+        rl = riding.tolist()
+        out = dict(bike=riding.astype(np.int32), kind=self.fleet.kind[riding].copy(),
+                   o_place=np.array([self._trip_oplace[b] for b in rl], dtype=np.int16),
+                   o_node=np.array([self._trip_onode[b] for b in rl], dtype=np.int32),
+                   start_t=np.array([self._trip_t0[b] for b in rl], dtype=np.float64))
+        if level == "destination":
+            self.oracle_used = True
+            out["d_node"] = np.array([self._trip_dest[b] for b in rl], dtype=np.int32)
+            out["end_t"] = np.array([self._trip_eta[b] for b in rl], dtype=np.float64)
+        return InFlight(len(riding), **out)
+
+    def observe(self) -> Observation:
+        """What a controller may see now (spec §8): copies and read-only views, never the queue."""
+        f = self.fleet
+        trucks = tuple(TruckView(tr.id, tr.stop, tr.drive_node, tr.busy, tr.current, tr.eta if tr.busy else self.now,
+                                 len(tr.queue), len(tr.load), sum(f.kind_l[b] == ELECTRIC for b in tr.load),
+                                 tr.stock, tr.used) for tr in self.trucks)
+        return Observation(self.now, self.datetime, f.n_bikes.copy(), readonly(f.node), readonly(f.status),
+                           readonly(f.kind), readonly(f.battery_km),
+                           {name: part.counts() for name, part in self._parts.items()}, trucks,
+                           self.inflight(), self.kpis())
+
     def add_partition(self, name: str, node_to_group: np.ndarray) -> None:
         """Register a partition of the bike nodes (``-1`` = no group); see :mod:`bss_sim.partitions`.
 
@@ -361,6 +405,7 @@ class Simulator:
         return {"bundle_id": self.scenario.bundle_id, "bundle": str(self.scenario.root),
                 "config": self.config.to_dict(), "config_hash": self.config.config_hash(),
                 "seed": self.seed, "start": self.start.isoformat(), "clock_s": self.now,
+                "oracle_allowed": self.config.info.allow_oracle, "oracle_used": self.oracle_used,
                 "bss_sim": bss_sim.__version__, "numpy": np.__version__}
 
     def save_log(self, path: str | Path) -> Path:
@@ -492,6 +537,9 @@ class Simulator:
             self._trip_ride[bike] = ride
             if self.log is not None:
                 self.log.append((t, TRIP_REQUEST, rid, bike, dn, SERVED, 0.0))
+            self._trip_oplace[bike], self._trip_onode[bike] = op, -1
+            self._trip_t0[bike] = t
+            self._trip_eta[bike] = t + ride
             self.queue.push(t + ride, TRIP_END, bike)
             return
         to_ext = dp == ext
@@ -518,6 +566,7 @@ class Simulator:
         self._trip_km[bike] = trip_km
         self._trip_ride[bike] = ride
         self._trip_req[bike] = rid
+        self._trip_oplace[bike], self._trip_onode[bike] = op, node
         if self.log is not None:
             self.log.append((t, TRIP_REQUEST, rid, bike, node, SERVED, walk))
         if walk > 0.0:
@@ -545,7 +594,9 @@ class Simulator:
             return
         self.kpis_.ride_km += self._trip_km[bike]
         f.set_status(bike, RIDING)
-        self.queue.push(self.now + self._trip_ride[bike], TRIP_END, bike)
+        self._trip_t0[bike] = self.now
+        self._trip_eta[bike] = self.now + self._trip_ride[bike]
+        self.queue.push(self._trip_eta[bike], TRIP_END, bike)
 
     def _trip_end(self, bike: int) -> None:
         node = self._trip_dest[bike]
@@ -588,7 +639,8 @@ class Simulator:
         if self.log is not None:
             self.log.append((self.now, REDIRECT, self._trip_req[bike], bike, alt,
                              NO_DOCK if extra_m > self.config.users.redirect_radius_m else SERVED, extra_m))
-        self.queue.push(self.now + extra_m / speed, TRIP_END, bike)
+        self._trip_eta[bike] = self.now + extra_m / speed
+        self.queue.push(self._trip_eta[bike], TRIP_END, bike)
         return True
 
     # ------------------------------------------------------------------------------- trucks
