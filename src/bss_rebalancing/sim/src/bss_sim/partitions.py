@@ -71,14 +71,14 @@ class Partition:
         g = self._g[node]
         self.bikes[g] += sign
         if fleet.kind_l[bike] == ELECTRIC:
-            self.ebikes[g][self.battery.band(fleet.battery_km[bike])] += sign
+            self.ebikes[g][self.battery.band(fleet._batt[bike])] += sign
 
     def fill_from(self, fleet) -> None:
         """Set the state counters (bikes, e-bike bands) from the fleet as it is now."""
         G1 = self.n_groups + 1
         self.bikes = [0] * G1
         self.ebikes = [[0] * self.n_bands for _ in range(G1)]
-        g, kind, batt = self._g, fleet.kind_l, fleet.battery_km
+        g, kind, batt = self._g, fleet.kind_l, fleet._batt
         for b in np.flatnonzero(fleet.status == PARKED).tolist():
             k = g[int(fleet.node[b])]
             self.bikes[k] += 1

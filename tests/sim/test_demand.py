@@ -123,3 +123,13 @@ def test_replay_times_are_exact(bundle, model):
     expected = np.sort((local.dt.hour().cast(pl.Float64) * 3600 + local.dt.minute().cast(pl.Float64) * 60
                         + local.dt.second().cast(pl.Float64)).to_numpy())
     np.testing.assert_allclose(ReplayDemand(model, bundle, seed=0).day(day).t_s, expected)
+
+
+def test_vectorised_ride_time_sampling_matches_the_loop(bundle):
+    rt = RideTimes(bundle / "demand" / "ride_time.npz")
+    rng = np.random.default_rng(1)
+    n = 5000
+    dist = np.where(rng.random(n) < 0.1, 0.0, rng.uniform(1.0, 9000.0, n))
+    kind = rng.integers(0, 2, n)
+    u = rng.random(n)
+    np.testing.assert_allclose(rt.sample(dist, kind, u), rt._sample_loop(dist, kind, u), rtol=1e-12)

@@ -88,3 +88,13 @@ def test_initial_nodes_proportional_and_capacity():
         initial_nodes(rng, 10, w, cap)
     with pytest.raises(ValueError):
         initial_nodes(rng, 1, np.zeros(3), None)
+
+
+def test_numpy_views_share_the_hot_path_buffers():
+    f = make(n=5, n_nodes=3)
+    b = f.take_external(0)
+    f.park(b, 2)
+    assert f.n_bikes[2] == 1 and f.node[b] == 2 and f.status[b] == PARKED  # views see buffer writes
+    f.battery_km[b] = 12.5                                                   # and the other way round
+    assert f._batt[b] == 12.5
+    assert f.n_bikes.base is not None and f.status.dtype == np.uint8

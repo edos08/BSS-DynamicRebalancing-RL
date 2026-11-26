@@ -3,9 +3,13 @@
 Every bike has a ``node``, a ``status``, a ``kind`` and a ``battery_km`` (NumPy arrays). Bikes
 parked at a node are kept in an intrusive doubly linked list stored in arrays (``head[node]``,
 ``nxt[bike]``, ``prv[bike]``), so adding and removing a bike is O(1) and listing a node's bikes is
-O(bikes there). The link arrays are plain Python lists: they are only read one element at a time on
-the hot path, where lists are several times faster than NumPy scalar access. ``n_bikes`` is a NumPy
-array because the user model reads it vectorised over the walking neighbourhood.
+O(bikes there).
+
+Storage: ``node``, ``status``, ``battery_km`` and ``n_bikes`` are NumPy arrays that are **views of
+``array.array`` buffers** (``_node``, ``_status``, ``_batt``, ``_nb``). The hot path reads and
+writes single elements through the buffers (several times faster than NumPy scalar access);
+vectorised code (the user model's neighbourhood scan, checks, partitions) uses the NumPy views of
+the same memory. The link arrays are plain Python lists.
 
 Statuses:
 
@@ -22,6 +26,8 @@ every structure from scratch.
 """
 
 from __future__ import annotations
+
+from array import array
 
 import numpy as np
 
@@ -40,14 +46,19 @@ class Fleet:
         self.range_km = float(range_km)
         self.kind = np.asarray(kind, dtype=np.uint8).copy()
         self.kind_l: list[int] = self.kind.tolist()  # immutable, read on the hot path
-        self.battery_km = np.asarray(battery_km, dtype=np.float64).copy()
-        self.battery_km[self.kind == MECHANICAL] = 0.0
-        self.node = np.full(n, -1, dtype=np.int32)
-        self.status = np.full(n, EXTERNAL, dtype=np.uint8)
+        batt = np.asarray(battery_km, dtype=np.float64).copy()
+        batt[self.kind == MECHANICAL] = 0.0
+        self._batt = array("d", batt.tobytes())
+        self._node = array("i", [-1]) * n
+        self._status = array("B", [EXTERNAL]) * n
+        self._nb = array("i", [0]) * n_nodes
+        self.battery_km = np.frombuffer(self._batt, dtype=np.float64) if n else np.zeros(0)
+        self.node = np.frombuffer(self._node, dtype=np.int32) if n else np.zeros(0, np.int32)
+        self.status = np.frombuffer(self._status, dtype=np.uint8) if n else np.zeros(0, np.uint8)
+        self.n_bikes = np.frombuffer(self._nb, dtype=np.int32)
         self.head: list[int] = [-1] * n_nodes
         self.nxt: list[int] = [-1] * n
         self.prv: list[int] = [-1] * n
-        self.n_bikes = np.zeros(n_nodes, dtype=np.int32)
         self.status_count = [0] * 6
         self.status_count[EXTERNAL] = n
         self.reservoir: tuple[list[int], list[int]] = ([], [])  # stacks per kind
@@ -58,23 +69,24 @@ class Fleet:
     # --- per-node lists -------------------------------------------------------------------
     def park(self, bike: int, node: int) -> None:
         """Put ``bike`` (not parked) at ``node``; status becomes PARKED."""
-        self.status_count[self.status[bike]] -= 1
+        st = self._status
+        self.status_count[st[bike]] -= 1
         self.status_count[PARKED] += 1
-        self.status[bike] = PARKED
-        self.node[bike] = node
+        st[bike] = PARKED
+        self._node[bike] = node
         h = self.head[node]
         self.nxt[bike] = h
         self.prv[bike] = -1
         if h >= 0:
             self.prv[h] = bike
         self.head[node] = bike
-        self.n_bikes[node] += 1
+        self._nb[node] += 1
         for f in self.listeners:
             f(bike, node, 1)
 
     def unpark(self, bike: int, status: int) -> int:
         """Remove a parked ``bike`` from its node, give it ``status``; returns the node."""
-        node = int(self.node[bike])
+        node = self._node[bike]
         p, q = self.prv[bike], self.nxt[bike]
         if p >= 0:
             self.nxt[p] = q
@@ -82,31 +94,32 @@ class Fleet:
             self.head[node] = q
         if q >= 0:
             self.prv[q] = p
-        self.n_bikes[node] -= 1
+        self._nb[node] -= 1
         self.status_count[PARKED] -= 1
         self.status_count[status] += 1
-        self.status[bike] = status
+        self._status[bike] = status
         for f in self.listeners:
             f(bike, node, -1)
         return node
 
     def set_status(self, bike: int, status: int) -> None:
         """Change the status of a bike that is not parked (use park/unpark for that)."""
-        self.status_count[self.status[bike]] -= 1
+        st = self._status
+        self.status_count[st[bike]] -= 1
         self.status_count[status] += 1
-        self.status[bike] = status
+        st[bike] = status
 
     def set_battery(self, bike: int, km: float) -> None:
         """Change a bike's charge; listeners see a parked bike leave and come back (band change)."""
-        if self.status[bike] == PARKED:
-            node = int(self.node[bike])
+        if self._status[bike] == PARKED:
+            node = self._node[bike]
             for f in self.listeners:
                 f(bike, node, -1)
-            self.battery_km[bike] = km
+            self._batt[bike] = km
             for f in self.listeners:
                 f(bike, node, 1)
         else:
-            self.battery_km[bike] = km
+            self._batt[bike] = km
 
     def bikes_at(self, node: int) -> list[int]:
         out, b = [], self.head[node]
@@ -129,7 +142,7 @@ class Fleet:
 
     def to_external(self, bike: int) -> None:
         self.set_status(bike, EXTERNAL)
-        self.node[bike] = -1
+        self._node[bike] = -1
         self.reservoir[self.kind_l[bike]].append(bike)
 
     # --- checks ---------------------------------------------------------------------------

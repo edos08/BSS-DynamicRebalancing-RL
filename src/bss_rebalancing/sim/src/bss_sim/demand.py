@@ -67,12 +67,34 @@ class RideTimes:
             self.levels = z["levels"]
             self.speed_q = z["speed_q"]
             self.round_q = z["round_q"]
+        L = len(self.levels) - 1
+        self._uniform = bool(np.allclose(self.levels, np.linspace(0.0, 1.0, L + 1)))
+        nb = self.speed_q.shape[1]
+        # one table of inverse CDFs: rows k * nb + band for speeds, then 2 * nb + k for round trips
+        self._table = np.concatenate([self.speed_q.reshape(2 * nb, L + 1), self.round_q], axis=0)
 
     def band(self, dist_m: np.ndarray) -> np.ndarray:
         return np.clip(np.searchsorted(self.bands_m, dist_m, side="right") - 1, 0, len(self.bands_m) - 2)
 
     def sample(self, dist_m: np.ndarray, kind: np.ndarray, u: np.ndarray) -> np.ndarray:
-        """Ride times (s) for uniforms ``u``; ``dist_m <= 0`` means a round trip."""
+        """Ride times (s) for uniforms ``u``; ``dist_m <= 0`` means a round trip.
+
+        Linear interpolation of the quantile table at ``u`` (as ``np.interp``), vectorised over all
+        requests at once when the quantile levels are a uniform grid (as written by bss_scenario)."""
+        if not self._uniform:
+            return self._sample_loop(dist_m, kind, u)
+        nb = self.speed_q.shape[1]
+        L = len(self.levels) - 1
+        kind = np.asarray(kind, dtype=np.int64)
+        rt = dist_m <= 0
+        row = np.where(rt, 2 * nb + kind, kind * nb + self.band(dist_m))
+        x = np.clip(u, 0.0, 1.0) * L
+        i = np.minimum(x.astype(np.int64), L - 1)
+        f = x - i
+        q = self._table[row, i] * (1.0 - f) + self._table[row, i + 1] * f
+        return np.where(rt, q, dist_m / np.where(rt, 1.0, q))
+
+    def _sample_loop(self, dist_m: np.ndarray, kind: np.ndarray, u: np.ndarray) -> np.ndarray:
         out = np.empty(len(dist_m))
         rt = dist_m <= 0
         b = self.band(dist_m)
