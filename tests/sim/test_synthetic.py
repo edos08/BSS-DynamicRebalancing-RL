@@ -47,9 +47,10 @@ def test_runs_with_invariants(small):
 
 def test_bench_reports_budget_fields(small, tmp_path):
     res = bench.run(small, repeat=1, threads=2)
-    for key in ("load_s", "week_s", "peak_mb", "week_docked_s", "week_partition_s", "threads_speedup"):
+    for key in ("load_s", "week_s", "week_truck_s", "peak_mb", "week_docked_s", "week_partition_s", "threads_speedup"):
         assert res[key] > 0
-    assert set(res["budget"]) == {"load_s", "week_s", "peak_mb"}
+    assert set(res["budget"]) == {"load_s", "week_s", "week_truck_s", "peak_mb"}
+    assert res["truck_week"]["commands"] > 0
     out = tmp_path / "b.json"
     assert bench.main([str(small), "--repeat", "1", "--threads", "1", "--json", str(out)]) == 0
     assert out.exists()

@@ -50,6 +50,10 @@ class Truck:
     picked: int = 0
     dropped: int = 0
     swapped: int = 0
+    kwh: float = 0.0
+    kwh_since_depot: float = 0.0
+    over_battery: bool = False     # kwh_since_depot passed the usable battery (flag counted once per stint)
+    energy_flags: int = 0
     auto_restock: bool = False     # a depot trip inserted by on_empty: resume is in the queue
     idle_reported: bool = False
 

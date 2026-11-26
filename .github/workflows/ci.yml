@@ -74,6 +74,7 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         if: always()
+        continue-on-error: true   # an artifact-service outage must not fail the benchmark
         with:
           name: bench-${{ matrix.python }}
           path: bench-${{ matrix.python }}.json
