@@ -40,7 +40,8 @@ def test_readme_custom_training_loop(data_path, tmp_path):
         next_state = convert_graph_to_data(graph, node_features=FEATURES)
         next_state.agent_state, next_state.steps = obs, info["steps"]
 
-        agent.replay_buffer.push(state, action, reward, next_state, done)
+        agent.replay_buffer.push(state, action, reward, next_state, done, steps=info["steps"], terminal=False)
+        assert agent.replay_buffer.buffer[-1].steps.item() == info["steps"]    # this action's duration
         losses.append(agent.train_step(batch_size=64))
         if timeslot_done:
             agent.update_epsilon()
@@ -62,3 +63,32 @@ def test_readme_custom_training_loop(data_path, tmp_path):
     agent2.load_model(path)
     q1, q2 = agent.get_q_values(single), agent2.get_q_values(single)
     assert torch.allclose(q1, q2)
+
+
+def test_smdp_target_and_action_return():
+    import pytest
+
+    g = 0.9
+    assert DQNAgent.action_return([1.0, 1.0, 1.0], g) == pytest.approx(1 + 0.9 + 0.81)
+    assert DQNAgent.action_return([], g) == 0.0
+    reward = torch.tensor([[1.0], [1.0], [1.0]])
+    steps = torch.tensor([[1], [3], [3]])
+    terminal = torch.tensor([[False], [False], [True]])
+    next_q = torch.tensor([[10.0], [10.0], [10.0]])
+    y = DQNAgent.smdp_target(reward, steps, terminal, next_q, g)
+    assert torch.allclose(y, torch.tensor([[1 + 0.9 * 10], [1 + 0.729 * 10], [1.0]]))
+
+
+def test_push_requires_the_action_duration():
+    import pytest
+
+    s = Data(x=torch.zeros(2, 4), edge_index=torch.zeros(2, 0, dtype=torch.long), edge_attr=torch.zeros(0, 1))
+    s.agent_state = [0.0, 1.0]
+    buf = ReplayBuffer(10)
+    with pytest.raises(ValueError, match="duration"):
+        buf.push(s, 0, 1.0, s, False)
+    with pytest.raises(ValueError):
+        buf.push(s, 0, 1.0, s, False, steps=0)
+    buf.push(s, 0, 1.0, s, True, steps=4)
+    t = buf.buffer[-1]
+    assert t.steps.item() == 4 and t.done.item() and not t.terminal.item()
