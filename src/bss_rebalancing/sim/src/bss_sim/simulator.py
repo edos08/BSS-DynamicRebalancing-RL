@@ -147,6 +147,7 @@ class Simulator:
         self.depot_stop = scenario.stop_at(self.depot_drive)
         self._b2d: list[int] = scenario.bike_to_drive.tolist()
         self.trucks: list[Truck] = []
+        self._fc = None
         self.van = VanEnergy(config.vehicle)
         self.costs = CostModel(config.costs)
 
@@ -300,7 +301,7 @@ class Simulator:
         return self._inflight(level)
 
     def _inflight(self, level: str) -> InFlight | None:
-        """Trips in progress at ``level`` without the permission check (for internal providers)."""
+        """Trips in progress at ``level`` without the permission check (forecast internals)."""
         if level == "none":
             return None
         riding = np.flatnonzero(self.fleet.status == RIDING)
@@ -316,6 +317,22 @@ class Simulator:
             out["d_node"] = np.array([self._trip_dest[b] for b in rl], dtype=np.int32)
             out["end_t"] = np.array([self._trip_eta[b] for b in rl], dtype=np.float64)
         return InFlight(len(riding), **out)
+
+    def forecast(self, window_s: float, partition: str, provider: str = "mean", samples: int = 100):
+        """Departures and arrivals per group of ``partition`` in ``(now, now + window_s]``
+        (:mod:`bss_sim.forecast`). ``provider``: ``mean`` (``sampled`` and ``oracle``: #129)."""
+        from bss_sim import forecast as fc
+
+        if partition not in self._parts:
+            raise KeyError(f"no partition {partition!r}; register it with add_partition")
+        if not 0 < window_s <= fc.TMAX_S:
+            raise ValueError(f"window_s must be in (0, {fc.TMAX_S:g}]")
+        if self._fc is None:
+            self._fc = fc.ForecastContext(self)
+        level = self.config.info.inflight_knowledge
+        if provider == "mean":
+            return fc.mean_forecast(self._fc, window_s, partition, level)
+        raise ValueError(f"unknown forecast provider {provider!r}")
 
     def observe(self) -> Observation:
         """What a controller may see now (spec §8): copies and read-only views, never the queue."""
