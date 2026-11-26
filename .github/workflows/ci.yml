@@ -42,6 +42,7 @@ jobs:
             -e src/bss_rebalancing/scenario \
             -e "src/bss_rebalancing/sim[logs]" \
             -e src/bss_rebalancing/policies \
+            -e src/bss_rebalancing/gym \
             pytest
 
       - name: Run tests
