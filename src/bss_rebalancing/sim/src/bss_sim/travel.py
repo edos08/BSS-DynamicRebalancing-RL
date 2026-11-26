@@ -58,6 +58,10 @@ class FreeFlow:
     def base_time(self, a: int, b: int, t: float) -> float:
         return self.scale * float(self._time[a, b])
 
+    def matrix(self, a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+        """Expected (noise-free) times ``[len(a), len(b)]`` between drive nodes, leaving at ``t``."""
+        return self.scale * np.asarray(self._time[np.ix_(a, b)], dtype=np.float64)
+
     def time(self, a: int, b: int, t: float) -> float:
         """Driving time (s) from drive node ``a`` to ``b`` leaving at clock time ``t``."""
         base = self.base_time(a, b, t)
@@ -93,6 +97,12 @@ class CongestionFactors(FreeFlow):
         day, sec = divmod(t, 86400.0)
         f = self.factors[self._day_type(int(day)), int(sec // 3600)]
         return self.scale * float(np.dot(f, self._by_class[:, a, b]))
+
+    def matrix(self, a: np.ndarray, b: np.ndarray, t: float) -> np.ndarray:
+        day, sec = divmod(t, 86400.0)
+        f = self.factors[self._day_type(int(day)), int(sec // 3600)]
+        by = np.asarray(self._by_class[:, np.asarray(a)[:, None], np.asarray(b)[None, :]], dtype=np.float64)
+        return self.scale * np.tensordot(f, by, axes=1)
 
 
 def load_factors(path: str | Path) -> np.ndarray:

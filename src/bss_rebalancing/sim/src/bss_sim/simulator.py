@@ -352,6 +352,26 @@ class Simulator:
             return fc.oracle_forecast(self._fc, window_s, partition)
         raise ValueError(f"unknown forecast provider {provider!r}")
 
+    def expected_drive_times(self, from_nodes, to_nodes, t: float | None = None) -> np.ndarray:
+        """Expected truck driving times (s) ``[len(from), len(to)]`` between **bike nodes** (each
+        served by its nearest drive node), leaving at ``t`` (default now). Noise-free and without
+        side effects: what an operator knows from maps and traffic history. Distances:
+        :meth:`expected_drive_distances`."""
+        a = self.scenario.bike_to_drive[np.asarray(from_nodes, dtype=np.int64)]
+        b = self.scenario.bike_to_drive[np.asarray(to_nodes, dtype=np.int64)]
+        return self.travel.matrix(a, b, self.now if t is None else t)
+
+    def nodes_within(self, node: int, radius_m: float) -> list[int]:
+        """Bike nodes within ``radius_m`` walking distance of ``node``, nearest first (itself first)."""
+        if radius_m > self.scenario.walk_max_m:
+            raise ValueError(f"radius_m above the bundle's walking neighbours ({self.scenario.walk_max_m} m)")
+        return self._within(int(node), float(radius_m))
+
+    def expected_drive_distances(self, from_nodes, to_nodes) -> np.ndarray:
+        a = self.scenario.bike_to_drive[np.asarray(from_nodes, dtype=np.int64)]
+        b = self.scenario.bike_to_drive[np.asarray(to_nodes, dtype=np.int64)]
+        return np.asarray(np.asarray(self.scenario.drive_dist)[np.ix_(a, b)], dtype=np.float64)
+
     def observe(self) -> Observation:
         """What a controller may see now (spec §8): copies and read-only views, never the queue."""
         f = self.fleet
