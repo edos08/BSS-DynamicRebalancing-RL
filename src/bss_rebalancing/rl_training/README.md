@@ -142,7 +142,7 @@ last weights are often not the best. `bss-train` does the same with its validati
 
 ### Weights & Biases
 
-Add `--wandb` (and optionally `--wandb-project bss-rebalancing`, `--wandb-entity <team>`,
+Add `--wandb` (and optionally `--wandb-project <name>`, `--wandb-entity <user or team>`,
 `--wandb-mode offline`) to `bss-train` or `train_grid` (issue #171). It logs:
 - the configuration, including the reward;
 - every episode (return, failures, service level, invalid actions, epsilon, loss, buffer size);
@@ -153,8 +153,10 @@ artifact with alias `best`, and its episode and score as metadata (issue #174). 
 other models stay in `results/run_NNN/`. A resumed run (`--resume`) continues
 the same W&B run. Install the extra with `pip install -e "src/bss_rebalancing/rl_training[tracking]"`.
 
-**API key**: put `export WANDB_API_KEY=...` in `~/.config/bss-rl/secrets.sh` and `source` it
-before training, or run `wandb login` once. The code never prints or stores the key. In offline
+**Settings**: the API key (`WANDB_API_KEY`) and the defaults for the flags (`WANDB_ENTITY`,
+`WANDB_PROJECT`, `WANDB_MODE`) come from your personal settings: `bss-settings init`, then fill in
+`~/.config/bss-rebalancing/.env` (see [docs/configuration.md](../../../docs/configuration.md)). Flags
+override the settings. `wandb login` also works. The code never prints or stores the key. In offline
 mode nothing is uploaded; `wandb sync results/run_NNN/wandb/offline-run-*` uploads later.
 
 ## Training Parameters

@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bss-settings"
+version = "0.1.0"
+description = "Personal settings (API keys, tracking accounts) read from the environment or files outside the repo"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    {name = "Edoardo Scarpel", email = "edoardo.scarpel@phd.unipd.it"}
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+bss-settings = "bss_settings.cli:main"
+
+[project.urls]
+Repository = "https://github.com/edos08/BSS-DynamicRebalancing-RL"
+
+[tool.setuptools.packages.find]
+where = ["src"]

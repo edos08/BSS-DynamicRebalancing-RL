@@ -34,6 +34,7 @@ jobs:
       - name: Install packages
         run: |
           pip install \
+            -e src/bss_rebalancing/settings \
             -e src/bss_rebalancing/gymnasium_env \
             -e "src/bss_rebalancing/rl_training[tracking]" \
             -e src/bss_rebalancing/preprocessing \

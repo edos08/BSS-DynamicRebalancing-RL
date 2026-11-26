@@ -13,6 +13,7 @@ authors = [
     {name = "Edoardo Scarpel", email = "edoardo.scarpel@phd.unipd.it"}
 ]
 dependencies = [
+    "bss-settings",
     "networkx>=3.3",
     "numpy>=2.0",
     "polars>=1.0",

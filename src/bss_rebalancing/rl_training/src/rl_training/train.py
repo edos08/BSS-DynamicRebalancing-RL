@@ -234,9 +234,11 @@ def create_parser() -> argparse.ArgumentParser:
         help='Do not save the replay buffer in checkpoints (a resume then starts with an empty buffer).'
     )
     parser.add_argument('--wandb', action='store_true', help='Track the run with Weights & Biases.')
-    parser.add_argument('--wandb-project', type=str, default='bss-rebalancing')
-    parser.add_argument('--wandb-entity', type=str, default=None)
-    parser.add_argument('--wandb-mode', type=str, default='online', choices=['online', 'offline'])
+    # defaults from the settings (WANDB_PROJECT / WANDB_ENTITY / WANDB_MODE, see .env.example)
+    parser.add_argument('--wandb-project', type=str, default=None, help='default: $WANDB_PROJECT or bss-rebalancing')
+    parser.add_argument('--wandb-entity', type=str, default=None, help='default: $WANDB_ENTITY or your W&B default')
+    parser.add_argument('--wandb-mode', type=str, default=None, choices=['online', 'offline'],
+                        help='default: $WANDB_MODE or online')
     return parser
 
 
