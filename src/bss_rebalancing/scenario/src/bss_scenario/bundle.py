@@ -7,7 +7,7 @@ A bundle is a directory the simulator only reads::
     ├── manifest.json        inputs (with SHA-256), package versions, command line, outputs (SHA-256)
     ├── trips/               YYYY-MM.parquet + cleaning_report.json         (bss-scenario trips)
     ├── network/             nodes, edges, distance/time matrices, ...      (bss-scenario networks)
-    ├── stations/            stations.parquet + stations_report.json        (bss-scenario stations)
+    ├── stations/            stations.parquet + stations.npz + report       (bss-scenario stations)
     └── demand/              places, volume, OD shape (+ ride time, spreading)  (bss-scenario demand)
 
 Traffic congestion (#57) is added as a further component with the same rules.
@@ -40,7 +40,7 @@ COMPONENT_FILES: dict[str, tuple[str, ...]] = {
     "network": ("network/bike_nodes.parquet", "network/bike_edges.parquet", "network/bike_dist.npy",
                 "network/bike_walk_nbrs.npz", "network/drive_nodes.parquet", "network/drive_edges.parquet",
                 "network/drive_time.npy", "network/bike_to_drive.npz", "network/network_report.json"),
-    "stations": ("stations/stations.parquet", "stations/stations_report.json"),
+    "stations": ("stations/stations.parquet", "stations/stations.npz", "stations/stations_report.json"),
     "demand": ("demand/places.parquet", "demand/volume.parquet", "demand/volume.json", "demand/shape.npz",
                "demand/ride_time.npz", "demand/spread.npz", "demand/replay/index.json",
                "demand/demand_report.json"),
@@ -116,7 +116,7 @@ def build_bundle(config: BuildConfig, out: str | Path, argv: list[str] | None = 
     """Build trips, networks and stations into ``out`` and write ``scenario.yaml`` and ``manifest.json``."""
     from bss_scenario.demand.build import DemandConfig, build_demand
     from bss_scenario.network import Projection, build_networks
-    from bss_scenario.stations import build_stations, stations_report
+    from bss_scenario.stations import build_stations, stations_report, write_stations
     from bss_scenario.trips import CleaningConfig, clean_trips
 
     out = Path(out)
@@ -134,8 +134,7 @@ def build_bundle(config: BuildConfig, out: str | Path, argv: list[str] | None = 
     stations = build_stations(sorted((out / "trips").glob("*.parquet")), config.boundary,
                               config.gbfs_station_information, out / "network" / "bike_nodes.parquet",
                               Projection(**net_report["projection"]))
-    (out / "stations").mkdir(exist_ok=True)
-    stations.write_parquet(out / "stations" / "stations.parquet")
+    write_stations(stations, out / "stations")
     (out / "stations" / "stations_report.json").write_text(json.dumps(stations_report(stations), indent=2) + "\n")
 
     scenario = _scenario(config, net_report["projection"], ["network", "stations", "trips"])
