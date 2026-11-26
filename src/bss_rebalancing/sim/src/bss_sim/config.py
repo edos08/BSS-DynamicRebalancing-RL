@@ -102,6 +102,20 @@ class ExternalConfig:
 
 
 @dataclass(frozen=True)
+class TravelConfig:
+    model: str = "auto"                  # auto (congestion if the bundle has fitted factors) | freeflow | congestion
+    scale: float = 1.0                   # multiplies free-flow times (calibration against routing data)
+    noise_sigma: float = 0.0             # log-normal noise on each drive (0 = deterministic)
+    factors: tuple[tuple[tuple[float, ...], ...], ...] | None = None  # [3 day types][24 h][road classes]
+
+    def __post_init__(self):
+        _check(self.model in ("auto", "freeflow", "congestion"),
+               f"travel.model must be 'auto', 'freeflow' or 'congestion', got {self.model!r}")
+        _check(self.scale > 0, "travel.scale must be > 0")
+        _check(self.noise_sigma >= 0, "travel.noise_sigma must be >= 0")
+
+
+@dataclass(frozen=True)
 class TelemetryConfig:
     event_log: bool = False              # columnar log of every event outcome
     snapshot_every_s: float | None = None  # periodic per-node bike counts in the log
@@ -118,6 +132,7 @@ class SimConfig:
     energy: EnergyConfig = field(default_factory=EnergyConfig)
     users: UserConfig = field(default_factory=UserConfig)
     external: ExternalConfig = field(default_factory=ExternalConfig)
+    travel: TravelConfig = field(default_factory=TravelConfig)
     telemetry: TelemetryConfig = field(default_factory=TelemetryConfig)
     debug: bool = False                  # check invariants after every event (slow)
 
