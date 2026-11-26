@@ -562,6 +562,13 @@ Budget, single core, Python 3.11, enforced by benchmark tests:
 | 1 simulated week, 1 truck with random commands every ~5 min | ≤ 1 s |
 | Peak memory | ≤ 600 MB |
 
+**Measured (M3, #105)**, one week without trucks on the synthetic Cambridge-size bundle, in CI
+(GitHub runners): 0.27 s on 3.11, 0.32 s on 3.14, 0.26 s on 3.14t. Four simulators in threads run
+2.6× faster than serially on 3.14t. Peak memory is 219 MB. The real Cambridge bundle takes
+0.35 s per week on the development server. Details:
+[`reports/performance.md`](reports/performance.md). The CI `Benchmark` job fails when a budget is
+exceeded.
+
 Benchmarks run on Python 3.11, 3.14 and free-threaded 3.14t (parallel simulators in threads),
 and later against the Rust engine (§13). Training-side speed comes from: decisions only when a
 truck is idle, many simulators in parallel with batched policy inference, and no per-step
