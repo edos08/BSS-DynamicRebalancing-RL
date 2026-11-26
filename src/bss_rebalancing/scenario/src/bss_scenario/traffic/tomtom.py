@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import datetime as dt
 import json
-import os
 import time
 import urllib.error
 import urllib.parse
@@ -248,7 +247,6 @@ def status(od: pl.DataFrame, cache: str | Path) -> dict:
 
 
 def api_key_from_env() -> str:
-    key = os.environ.get(KEY_ENV, "").strip()
-    if not key:
-        raise RuntimeError(f"set {KEY_ENV} (never commit it)")
-    return key
+    """The TomTom key from the settings (environment, ./.env or the user file; see .env.example)."""
+    import bss_settings
+    return bss_settings.require(KEY_ENV)

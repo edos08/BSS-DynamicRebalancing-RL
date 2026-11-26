@@ -7,10 +7,11 @@ once at the end of training, alias ``best`` (issue #174); checkpoints stay local
 It is a no-op unless enabled, so the training code calls it unconditionally. ``wandb`` is an
 optional dependency (``pip install "bss-rl-training[tracking]"``).
 
-**Credentials**: W&B reads its API key from ``WANDB_API_KEY`` or from ``wandb login``
-(``~/.netrc``). Keep the key in ``~/.config/bss-rl/secrets.sh`` (``export WANDB_API_KEY=...``) and
-``source`` it before training; nothing here prints or stores it. ``mode="offline"`` logs locally
-(``wandb sync`` uploads later).
+**Settings and credentials** come from :mod:`bss_settings` (environment, ``./.env``, or the user
+file ``~/.config/bss-rebalancing/.env``; see ``.env.example``): ``WANDB_API_KEY``, and
+``WANDB_ENTITY`` / ``WANDB_PROJECT`` / ``WANDB_MODE`` as defaults when the arguments are not given.
+``wandb login`` (``~/.netrc``) also works. Nothing here prints or stores the key. ``mode="offline"``
+logs locally (``wandb sync`` uploads later).
 
 A resumed run (``--resume``) continues the same W&B run: its id is saved in the checkpoint.
 """
@@ -19,11 +20,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import bss_settings
+
+DEFAULT_PROJECT = "bss-rebalancing"
+
 
 class Tracker:
-    def __init__(self, enabled: bool = False, project: str = "bss-rebalancing", entity: str | None = None,
+    def __init__(self, enabled: bool = False, project: str | None = None, entity: str | None = None,
                  name: str | None = None, config: dict | None = None, run_dir: str | Path | None = None,
-                 run_id: str | None = None, mode: str = "online", tags: tuple[str, ...] = (),
+                 run_id: str | None = None, mode: str | None = None, tags: tuple[str, ...] = (),
                  group: str | None = None):
         self.run = None
         self.name = name or "run"
@@ -34,6 +39,10 @@ class Tracker:
         except ImportError as exc:
             raise SystemExit('--wandb needs the wandb package: pip install "bss-rl-training[tracking]"') from exc
         self._wandb = wandb
+        bss_settings.apply_to_environ(["WANDB_API_KEY"])       # wandb reads the key from the environment
+        project = project or bss_settings.get("WANDB_PROJECT", DEFAULT_PROJECT)
+        entity = entity or bss_settings.get("WANDB_ENTITY")
+        mode = mode or bss_settings.get("WANDB_MODE", "online")
         if run_dir is not None:
             Path(run_dir).mkdir(parents=True, exist_ok=True)
         self.run = wandb.init(project=project, entity=entity, name=name, config=config or {},

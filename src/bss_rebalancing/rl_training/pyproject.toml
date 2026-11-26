@@ -30,6 +30,7 @@ classifiers = [
 ]
 
 dependencies = [
+    "bss-settings",
     "numpy>=2.3.0",
     "pandas>=2.3.0",
     # torch >= 2.13 fixes all known advisories (incl. torch.load RCE); tested with 2.15.0 (CUDA 13.2,

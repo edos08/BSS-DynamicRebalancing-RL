@@ -53,3 +53,12 @@ paper_viz/
 *.tar.gz
 *.egg-info/
 *.pt
+
+# Personal settings and secrets (issue #176): only the template .env.example is tracked
+.env
+.env.*
+*.env
+!.env.example
+secrets*.sh
+.netrc
+wandb/

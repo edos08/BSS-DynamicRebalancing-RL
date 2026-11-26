@@ -40,6 +40,7 @@ dependencies = [
     "bss-sim @ file:src/bss_rebalancing/sim",
     "bss-policies @ file:src/bss_rebalancing/policies",
     "bss-gym @ file:src/bss_rebalancing/gym",
+    "bss-settings @ file:src/bss_rebalancing/settings",
 ]
 
 [project.optional-dependencies]

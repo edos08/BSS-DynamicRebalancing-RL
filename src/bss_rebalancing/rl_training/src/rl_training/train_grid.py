@@ -213,9 +213,10 @@ def main(argv=None) -> int:
     ap.add_argument("--val-every", type=int, default=5, help="validate the greedy policy every N episodes (0: never)")
     ap.add_argument("--val-date", default=None, help="week used for validation (default: the first --eval-dates)")
     ap.add_argument("--wandb", action="store_true", help="track the run with Weights & Biases")
-    ap.add_argument("--wandb-project", default="bss-rebalancing")
-    ap.add_argument("--wandb-entity", default=None)
-    ap.add_argument("--wandb-mode", default="online", choices=["online", "offline"])
+    # defaults from the settings (WANDB_PROJECT / WANDB_ENTITY / WANDB_MODE, see .env.example)
+    ap.add_argument("--wandb-project", default=None, help="default: $WANDB_PROJECT or bss-rebalancing")
+    ap.add_argument("--wandb-entity", default=None, help="default: $WANDB_ENTITY or your W&B default")
+    ap.add_argument("--wandb-mode", default=None, choices=["online", "offline"], help="default: $WANDB_MODE or online")
     args = ap.parse_args(argv)
     params = {**PARAMS, "gamma": args.gamma}
     set_seed(args.seed)

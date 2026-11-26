@@ -123,7 +123,14 @@ bss-rebalancing/
    CPU only: `pip install --index-url https://download.pytorch.org/whl/cpu torch==2.15.0`.
    Checkpoints saved with older torch versions (2.4.1) still load.
 
-4. **Verify installation**:
+4. **Personal settings** (only for what you use: TomTom traffic data, Weights & Biases):
+   ```bash
+   bss-settings init    # creates ~/.config/bss-rebalancing/.env from .env.example; fill in your keys
+   bss-settings check   # shows what is set and where from, never the values
+   ```
+   Keys and accounts stay outside the repository. See [docs/configuration.md](docs/configuration.md).
+
+5. **Verify installation**:
    ```bash
    bss-preprocess --help
    bss-train --help
@@ -307,6 +314,11 @@ Baseline comparison tools for evaluating RL performance.
 Interactive Dash web application for training visualization.
 - **CLI**: `bss-results-webapp`
 - **Features**: Real-time monitoring, episode analysis, spatial visualization
+
+### `settings`
+Personal settings (API keys, W&B account) read from the environment or files outside the repo.
+- **CLI**: `bss-settings check | init`
+- **Docs**: [docs/configuration.md](docs/configuration.md)
 
 ### `scenario` (simulator v2, in progress)
 Builds versioned scenario bundles (cleaned trips, networks, demand, truck travel data) for the new

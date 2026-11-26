@@ -98,7 +98,7 @@ snapshot, median fallback), `in_city` and nearest bike node.
 
 ```bash
 bss-scenario traffic sample  --graph data/raw/osm/cambridge_drive.graphml --out data/raw/traffic/od_sample.parquet
-export TOMTOM_API_KEY=...   # never commit it
+# TOMTOM_API_KEY from your settings (bss-settings init; docs/configuration.md), never committed
 bss-scenario traffic collect --od data/raw/traffic/od_sample.parquet --cache data/raw/traffic/tomtom --daily
 bss-scenario traffic status  --od data/raw/traffic/od_sample.parquet --cache data/raw/traffic/tomtom
 ```

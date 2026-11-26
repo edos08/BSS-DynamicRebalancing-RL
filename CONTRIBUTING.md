@@ -83,4 +83,7 @@ pytest -q
 ## Data and secrets
 
 - Raw and processed data live under `data*/` (git-ignored). Never commit data, models or results.
-- API keys (e.g. `TOMTOM_API_KEY`) are read from environment variables, never committed.
+- Personal settings (API keys such as `TOMTOM_API_KEY`, W&B account, ...) are read through `bss_settings`
+  from the environment or files outside the repo, never committed. Only the empty template
+  `.env.example` is tracked. New settings go in `KNOWN` and `.env.example`; see
+  [docs/configuration.md](docs/configuration.md).
