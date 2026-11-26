@@ -37,6 +37,7 @@ from bss_sim.demand import PoissonDemand, ReplayDemand
 from bss_sim.energy import Battery
 from bss_sim.engine import (REDIRECT, SLOT_START, TRIP_END, TRIP_REQUEST, TRIP_START, WAKEUP, EventQueue,
                             Notification, Until)
+from bss_sim.partitions import Partition, PartitionCounts
 from bss_sim.rng import Streams
 from bss_sim.scenario import Scenario
 from bss_sim.state import ELECTRIC, RESERVED, RIDING, Fleet, initial_nodes
@@ -121,6 +122,7 @@ class Simulator:
         self._ebike_share = (config.fleet.ebike_share if config.fleet.ebike_share is not None
                              else scenario.demand.ebike_share)
         self.fleet: Fleet | None = None
+        self._parts: dict[str, Partition] = {}
         self._docked = config.mode == "docked"
         if self._docked:
             self._init_docks()
@@ -159,6 +161,8 @@ class Simulator:
         self._ext_rng = self.streams.generator("external")
         self._init_fleet(snapshot)
         self.users.bind(self.fleet)
+        for part in self._parts.values():
+            part.bind(self.fleet)
 
         self.queue = EventQueue()
         self.kpis_ = Kpis()
@@ -219,6 +223,20 @@ class Simulator:
         self._wake_tags.append(tag)
         self.queue.push(float(t), WAKEUP, len(self._wake_tags) - 1)
 
+    def add_partition(self, name: str, node_to_group: np.ndarray) -> None:
+        """Register a partition of the bike nodes (``-1`` = no group); see :mod:`bss_sim.partitions`.
+
+        Can be called before or during a run; event counters start at the call (and at every reset)."""
+        if name in self._parts:
+            raise ValueError(f"partition {name!r} already registered")
+        part = Partition(name, node_to_group, self.scenario.n_nodes, self.battery)
+        self._parts[name] = part
+        if self.fleet is not None:
+            part.bind(self.fleet)
+
+    def partition(self, name: str) -> PartitionCounts:
+        return self._parts[name].counts()
+
     @property
     def datetime(self) -> dt.datetime:
         return dt.datetime.combine(self.day0, dt.time()) + dt.timedelta(seconds=self.now)
@@ -228,6 +246,10 @@ class Simulator:
 
     def check_invariants(self) -> None:
         self.fleet.check()
+        for part in self._parts.values():
+            bikes, ebikes = part.recompute_state(self.fleet)
+            c = part.counts()
+            assert np.array_equal(bikes, c.bikes) and np.array_equal(ebikes, c.ebikes), f"partition {part.name}"
         if self._docked:
             nb = self.fleet.n_bikes
             cap = np.asarray(self._cap)
@@ -305,6 +327,8 @@ class Simulator:
     # -------------------------------------------------------------------------------- events
     def _fail(self, rid: int, node: int, reason: int) -> None:
         self.kpis_.failures[reason] += 1
+        for p in self._parts.values():
+            p.failures[p._g[node]][reason] += 1
         if self.log is not None:
             self.log.append((self.now, TRIP_REQUEST, rid, -1, node, reason))
 
@@ -345,6 +369,8 @@ class Simulator:
         else:
             trip_km = float(self._dist[on, dn]) / 1000.0
         k.city_requests += 1
+        for p in self._parts.values():
+            p.requests[p._g[on]] += 1
         bike, walk, reason = self.users.choose(on, pref, self.battery.need_km(trip_km), u)
         if bike < 0:
             self._fail(rid, on, reason)
@@ -373,8 +399,12 @@ class Simulator:
             before = f.battery_km[bike]
             f.battery_km[bike] = self.battery.after_ride(before, self._trip_km[bike])
             self.kpis_.ebike_km += self._trip_km[bike]
-        if self.log is not None:
-            self.log.append((self.now, TRIP_START, int(self._trip_req[bike]), bike, int(f.node[bike]), SERVED))
+        if self._parts or self.log is not None:
+            node = int(f.node[bike])  # where the bike was taken (kept after unpark)
+            for p in self._parts.values():
+                p.departures[p._g[node]] += 1
+            if self.log is not None:
+                self.log.append((self.now, TRIP_START, int(self._trip_req[bike]), bike, node, SERVED))
         if self._trip_dest[bike] < 0:  # to outside: the bike leaves the city now
             self.kpis_.to_external += 1
             f.to_external(bike)
@@ -389,6 +419,8 @@ class Simulator:
             return
         self.fleet.park(bike, node)
         self.kpis_.trips_ended += 1
+        for p in self._parts.values():
+            p.arrivals[p._g[node]] += 1
         if self.log is not None:
             self.log.append((self.now, TRIP_END, int(self._trip_req[bike]), bike, node, SERVED))
 
