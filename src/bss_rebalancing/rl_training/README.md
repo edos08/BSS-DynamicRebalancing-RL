@@ -148,8 +148,9 @@ Add `--wandb` (and optionally `--wandb-project bss-rebalancing`, `--wandb-entity
 - every episode (return, failures, service level, invalid actions, epsilon, loss, buffer size);
 - every validation.
 
-Models are stored as versioned artifacts: `best` whenever the validation improves, `final` at the
-end, and `latest` (a `train_grid` checkpoint at each validation). A resumed run (`--resume`) continues
+Only the **best model** of each run (by validation) is uploaded, once at the end of training, as one
+artifact with alias `best`, and its episode and score as metadata (issue #174). Checkpoints and the
+other models stay in `results/run_NNN/`. A resumed run (`--resume`) continues
 the same W&B run. Install the extra with `pip install -e "src/bss_rebalancing/rl_training[tracking]"`.
 
 **API key**: put `export WANDB_API_KEY=...` in `~/.config/bss-rl/secrets.sh` and `source` it
