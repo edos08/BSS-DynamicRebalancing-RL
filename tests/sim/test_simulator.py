@@ -31,7 +31,8 @@ def test_two_days_with_invariants_checked_after_every_event(sim):
     assert k["requests"] > 100
     assert k["requests"] == k["served"] + k["failed"] + k["skipped_external_both"]
     c = sim.fleet.counts()
-    assert sum(c.values()) == 50
+    assert sum(c.values()) == 50 + 15  # city + reservoir + the truck's initial load
+    assert c["on_truck"] == 15
     in_flight = c["reserved"] + c["riding"]
     assert k["served"] == k["trips_ended"] + k["to_external"] + in_flight
     assert 0 < k["service_level"] <= 1

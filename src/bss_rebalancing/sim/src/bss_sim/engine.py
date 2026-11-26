@@ -25,10 +25,11 @@ TRIP_START = 2
 TRIP_REQUEST = 3
 SNAPSHOT = 4
 REDIRECT = 5  # log only: a docked trip continues to another station (the next TripEnd is queued)
+TRUCK = 6     # a truck finishes its current drive, service or wait
 WAKEUP = 9
 
 EVENT_NAMES = {SLOT_START: "SlotStart", TRIP_END: "TripEnd", TRIP_START: "TripStart",
-               TRIP_REQUEST: "TripRequest", SNAPSHOT: "Snapshot", REDIRECT: "Redirect", WAKEUP: "Wakeup"}
+               TRIP_REQUEST: "TripRequest", SNAPSHOT: "Snapshot", REDIRECT: "Redirect", TRUCK: "Truck", WAKEUP: "Wakeup"}
 
 
 class EventQueue:
