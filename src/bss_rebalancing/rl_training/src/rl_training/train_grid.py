@@ -389,7 +389,7 @@ def main(argv=None) -> int:
                 f"failures/day {res.mean_daily_failures:7.1f} moved {s['bikes_moved']:5d} "
                 f"invalid {s['invalid']:5d}/{s['decisions']:5d} eps {s['epsilon']:.3f} loss {s['loss']:.4f} "
                 f"wall {s['wall_s']:.0f}s")
-        out(line)
+        # console: only the progress bar (the episode line goes to training/logs/train.log)
         logger.info(line)
         tracker.log({f"train/{k}": v for k, v in s.items()} | {"train/mean_daily_failures": res.mean_daily_failures,
                     "train/buffer": len(agent.replay_buffer)}, step=ep)
