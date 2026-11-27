@@ -153,9 +153,11 @@ both the same way:
 - `models/episodes/`, `models/best/` and `models/final/`, each with its `metadata.json`, plus
   `best_models_summary.csv`.
 
-It also accepts the legacy flags `--num-episodes`, `--max-num-bikes`, `--min-num-bikes` (0 only: the
-new simulator has no per-zone minimum) and `--critic-mode` (`poisson` only: the new env never sees
-future trips). Both trainers copy the target network every 8 slots; `soft_update`/`tau` are recorded
+It also accepts the legacy flags `--num-episodes`, `--critic-mode` (`poisson` only: the new env never
+sees future trips) and the initial-state flags, with the same rules and defaults as `bss-train`:
+`--max-num-bikes` (whole fleet, 15 on the truck), `--min-num-bikes` per zone, the rest in the depot or
+spread with `--enable-repositioning` (`--use-net-flow`: by the forecast net outflow of the first slot).
+The reward is the legacy one, failures included: total failures / slots in the last step. Both trainers copy the target network every 8 slots; `soft_update`/`tau` are recorded
 but unused, as in `train.py`.
 
 ### Weights & Biases
