@@ -36,8 +36,11 @@ them as ``R = sum_i gamma^i r_i`` and the next state by ``gamma^tau`` (issue #16
 **Critic** (legacy formula, ``critic = -1 + exp((1 + 0.2 a)(1 - bikes / expected))``):
 ``expected = max(D - A, 0) + min_bikes`` and ``a = A``. ``D`` and ``A`` are the forecast departures
 and arrivals of the zone over the next ``critic_window_s`` (3 h), from ``sim.forecast`` (no oracle),
-refreshed every ``forecast_every_s``. A zone is critical above 0.05. Unlike the legacy cumulative
-peak, the window's net outflow is used.
+refreshed every ``forecast_every_s``. Unlike the legacy cumulative peak, the window's net outflow is
+used. With ``binary_critic`` (default, the legacy ``USE_BINARY_CRITIC`` of the paper runs) a zone with
+a positive score is critical and scores 1, and the global critic is the number of critical zones.
+Without it the raw score is used (critical above 0.05), up to e^10 per zone, which makes the
+change-of-global-critic reward term reach +-10^4 per step.
 
 **Reward** (:class:`RewardConfig`): the legacy shaped reward of the action (drop or pick-up by
 criticality, charge usefulness, eligibility, stay, loops, deployment, change of global critic),
@@ -119,7 +122,7 @@ class GridZoneEnv(gym.Env):
                  episode_days: float = 7.0, cell_m: float = 300.0, step_s: float = 30.0,
                  radius_m: float = 250.0, critic_window_s: float = 3 * 3600.0, forecast_every_s: float = 900.0,
                  min_bikes: int = 1, reward: RewardConfig | None = None, eligibility_decay: float = 0.9968,
-                 border_eligibility_decay: float = 0.99, slot_s: float = 3 * 3600.0):
+                 border_eligibility_decay: float = 0.99, slot_s: float = 3 * 3600.0, binary_critic: bool = True):
         cfg = sim_config if isinstance(sim_config, SimConfig) else SimConfig.from_dict(sim_config or {})
         if cfg.trucks.count != 1:
             cfg = cfg.replace(**{"trucks.count": 1})
@@ -139,6 +142,7 @@ class GridZoneEnv(gym.Env):
         self.decay = eligibility_decay
         self.border_decay = border_eligibility_decay
         self.slot_s = slot_s
+        self.binary_critic = binary_critic
         self._build_grid(cell_m)
         Z = self.zones.n
         self.n_zones = Z
@@ -227,13 +231,22 @@ class GridZoneEnv(gym.Env):
         self.bikes = bikes
         with np.errstate(over="ignore"):
             expo = np.minimum((1.0 + 0.2 * self._after) * (1.0 - bikes / self._expected), 10.0)
-            critic = np.where(self._expected > 0, -1.0 + np.exp(expo), -bikes)
-        self.critic = critic
-        self.critical = critic > CRITIC_THRESHOLD
-        self.global_critic = float(np.maximum(critic, 0.0).sum())
-        t = 0.67   # legacy surplus threshold
-        surplus = bikes - np.floor(bikes * (1 + critic) * (1 - t) / (1 + critic * (1 - t) / t))
-        self.surplus = np.where(critic > -t, 0.0, np.maximum(surplus, 0.0))
+            raw = np.where(self._expected > 0, -1.0 + np.exp(expo), -bikes)
+        self.raw_critic = raw
+        if self.binary_critic:
+            # legacy USE_BINARY_CRITIC (the paper setting): a zone with a positive score is critical and
+            # scores 1; the global critic counts critical zones. Without it the score is exp(...) - 1, up
+            # to e^10 per zone, and the -0.5 * delta(global critic) reward term reaches +-10^4 per step.
+            self.critic = np.where(raw > 0.0, 1.0, raw)
+            self.critical = raw > 0.0
+            self.global_critic = float(self.critical.sum())
+        else:
+            self.critic = raw
+            self.critical = raw > CRITIC_THRESHOLD
+            self.global_critic = float(np.maximum(raw, 0.0).sum())
+        t = 0.67   # legacy surplus threshold (on the raw score, as in Cell.set_surplus_bikes)
+        surplus = bikes - np.floor(bikes * (1 + raw) * (1 - t) / (1 + raw * (1 - t) / t))
+        self.surplus = np.where(raw > -t, 0.0, np.maximum(surplus, 0.0))
 
     # ----------------------------------------------------------------------------- step
     def _command(self, action: int):

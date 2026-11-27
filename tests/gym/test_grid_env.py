@@ -100,3 +100,23 @@ def test_critic_and_failure_penalty(bundle):
     assert fails > 0 and all(p <= 0 for p in pen)
     assert np.isfinite(env.critic).all() and env.critical.dtype == bool
     assert env.global_critic >= 0
+
+
+def test_binary_critic_as_legacy(bundle):
+    """Default critic is the legacy binary one: critical zones score 1, global = their count, and the
+    shaped reward stays on the legacy scale (the raw exp score made it reach +-10^4)."""
+    env = make(bundle)
+    assert env.binary_critic
+    env.reset(seed=3)
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        _, r, _, truncated, _ = env.step(int(rng.integers(8)))
+        crit = env.critic
+        assert np.all((crit == 1.0) | (crit <= 0.0))
+        assert np.array_equal(env.critical, env.raw_critic > 0.0)
+        assert env.global_critic == float(env.critical.sum()) <= env.n_zones
+        if truncated:
+            break
+    raw = make(bundle, binary_critic=False)
+    raw.reset(seed=3)
+    assert raw.global_critic == pytest.approx(float(np.maximum(raw.raw_critic, 0.0).sum()))
