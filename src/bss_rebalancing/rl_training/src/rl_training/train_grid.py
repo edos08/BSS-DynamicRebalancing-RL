@@ -32,7 +32,8 @@ graph with per-zone means), the greedy evaluation on held-out weeks as
 (``models/episodes/episode_NNN/``, ``models/best/`` with ``metadata.json``, ``models/final/``) and the log
 in ``training/logs/train.log``. ``config.json`` uses the legacy hyper-parameter names (``num_episodes``,
 ``maximum_number_of_bikes``, ...), and the legacy flags ``--num-episodes``, ``--max-num-bikes``,
-``--min-num-bikes`` and ``--critic-mode`` are accepted. The best model is, as in ``train.py``, the one with
+``--min-num-bikes`` and ``--critic-mode`` are accepted, and the initial state follows the same rules (``--max-num-bikes``,
+``--min-num-bikes``, ``--enable-repositioning``, ``--use-net-flow``). The best model is, as in ``train.py``, the one with
 the lowest validation mean daily failures.
 """
 
@@ -92,8 +93,8 @@ def legacy_hyperparameters(args, params: dict, env, epsilon_decay: float, slots_
         "total_timeslots": slots_per_episode,
         "maximum_number_of_bikes": args.fleet,
         "minimum_number_of_bikes": args.min_num_bikes,
-        "enable_repositioning": False,
-        "use_net_flow": False,
+        "enable_repositioning": args.enable_repositioning,
+        "use_net_flow": args.use_net_flow,
         "critic_mode": args.critic_mode,
         "depot_position_id": depot_zone,
         "initial_cell_id": depot_zone,
@@ -120,9 +121,11 @@ class GraphState:
                     batch=torch.zeros(self.x.size(0), dtype=torch.long, device=device))
 
 
-def make_env(bundle: str, start_dates: list[str], days: float, sim_config: dict | None = None, cell_m: float = 300.0):
+def make_env(bundle: str, start_dates: list[str], days: float, sim_config: dict | None = None, cell_m: float = 300.0,
+             initial_bikes=None):
     from bss_gym import GridZoneEnv
-    return GridZoneEnv(bundle, sim_config=sim_config, start_dates=start_dates, episode_days=days, cell_m=cell_m)
+    return GridZoneEnv(bundle, sim_config=sim_config, start_dates=start_dates, episode_days=days, cell_m=cell_m,
+                       initial_bikes=initial_bikes)
 
 
 def zone_graph(env, stats: dict, cell_m: float) -> nx.MultiDiGraph:
@@ -240,10 +243,17 @@ def main(argv=None) -> int:
     ap.add_argument("--overwrite", action="store_true", help="replace an existing run with the same id without asking")
     ap.add_argument("--episodes", "--num-episodes", dest="episodes", type=int, default=30)
     ap.add_argument("--days", type=float, default=7.0, help="episode length in days")
-    ap.add_argument("--fleet", "--max-num-bikes", dest="fleet", type=int, default=340,
-                    help="bikes in the zone (Cambridge ratio: 800 per 1,824 docks); --max-num-bikes as in bss-train")
-    ap.add_argument("--min-num-bikes", type=int, default=0, choices=[0],
-                    help="as in bss-train; the new simulator has no per-zone minimum yet, so only 0")
+    # initial state, as in bss-train (legacy FullyDynamicEnv._bike_repositioning)
+    ap.add_argument("--max-num-bikes", "--fleet", dest="fleet", type=int, default=500,
+                    help="whole fleet: 15 on the truck, the rest in the zones or the depot (bss-train default 500)")
+    ap.add_argument("--min-num-bikes", type=int, default=1, help="bikes per zone at the start (bss-train default 1)")
+    ap.add_argument("--enable-repositioning", action="store_true",
+                    help="spread the remaining bikes over the zones too (otherwise they wait in the depot)")
+    ap.add_argument("--use-net-flow", action="store_true",
+                    help="with --enable-repositioning: by the forecast net outflow of the first slot")
+    ap.add_argument("--initial-distribution", default="legacy", choices=["legacy", "demand"],
+                    help="legacy: the bss-train rules above; demand: --max-num-bikes street bikes placed in "
+                         "proportion to demand by the simulator (plus 15 on the truck)")
     ap.add_argument("--critic-mode", default="poisson", choices=["poisson"],
                     help="as in bss-train; the new env only forecasts (no oracle of future trips)")
     ap.add_argument("--train-dates", nargs="+", default=["2024-09-09", "2024-09-16", "2024-09-23", "2024-10-14",
@@ -278,7 +288,20 @@ def main(argv=None) -> int:
     sim_config = {"mode": args.mode, "fleet": {"size": args.fleet}}
     if args.mode == "docked":
         sim_config["fleet"]["initial_distribution"] = "uniform"
-    env = make_env(args.bundle, args.train_dates, args.days, sim_config, args.cell_m)
+    initial_bikes = None
+    if args.initial_distribution == "legacy":
+        if args.mode == "docked":
+            ap.error("--initial-distribution legacy is for dockless mode (whole zones on one stop)")
+        from bss_gym import InitialBikes
+        initial_bikes = InitialBikes(max_bikes=args.fleet, min_bikes_per_zone=args.min_num_bikes,
+                                     enable_repositioning=args.enable_repositioning, use_net_flow=args.use_net_flow)
+    elif args.enable_repositioning or args.use_net_flow:
+        ap.error("--enable-repositioning/--use-net-flow need --initial-distribution legacy")
+
+    def env_for(dates):
+        return make_env(args.bundle, dates, args.days, sim_config, args.cell_m, initial_bikes)
+
+    env = env_for(args.train_dates)
     slots_per_episode = int(round(args.days * 8))
     T = params["exploration_time"] * args.episodes * slots_per_episode
     epsilon_decay = T * T / math.log(10.0)
@@ -374,7 +397,7 @@ def main(argv=None) -> int:
             rm.save_model(agent, ep, res.mean_daily_failures, model_type="episode")
         if args.val_every and (ep + 1) % args.val_every == 0:
             if val_env is None:
-                val_env = make_env(args.bundle, [val_date], args.days, sim_config, args.cell_m)
+                val_env = env_for([val_date])
             bar.set_description(f"[VAL] Run {args.run_id}. After epis {ep}, greedy week from {val_date}")
             saved_eps = agent.epsilon
             vres, vs = run_episode(val_env, agent, seed=20_000, device=args.device, learn=False, params=params,
@@ -422,7 +445,7 @@ def main(argv=None) -> int:
                           {"episode": args.episodes - 1, "note": "no validation; final model"})
 
     # greedy evaluation on held-out weeks, as the webapp's validation view
-    eval_env = make_env(args.bundle, args.eval_dates, args.days, sim_config, args.cell_m)
+    eval_env = env_for(args.eval_dates)
     val = ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False, mode="validation",
                          val_tag=f"final_episode_{args.episodes - 1:03d}")
     val.save_hyperparameters(params={**hyper, "eval_dates": args.eval_dates, "eval_seeds": args.eval_seeds},
