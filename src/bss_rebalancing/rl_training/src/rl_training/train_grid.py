@@ -18,7 +18,7 @@ per slot so that it reaches ~0.1 after ``exploration_time`` of the training), wi
   networks, optimizer, epsilon, RNG states and replay buffer. ``--resume`` continues an interrupted
   run exactly where it stopped.
 * Every ``--val-every`` episodes the greedy policy is evaluated on ``--val-date`` (a held-out week).
-  The best one by city service level is kept as ``models/model_best.pt``: DQN performance
+  The best one by mean daily failures is kept in ``models/best/``: DQN performance
   oscillates during training, so the final weights are often not the best.
 
 **Weights & Biases** (issue #171, optional): ``--wandb`` logs the configuration, every episode and
@@ -28,13 +28,20 @@ the end of training (issue #174).
 Results use the legacy layout, so ``bss-results-webapp`` shows them next to the legacy runs:
 ``<results>/run_NNN/training/episode_NNN/`` (scalars, per-3 h timeslot metrics, step data, zone
 graph with per-zone means), the greedy evaluation on held-out weeks as
-``validation/episode_NNN/episode_000/``, and models in ``models/``.
+``validation/episode_NNN/episode_000/`` (with its ``config.json``), models as in ``train.py``
+(``models/episodes/episode_NNN/``, ``models/best/`` with ``metadata.json``, ``models/final/``) and the log
+in ``training/logs/train.log``. ``config.json`` uses the legacy hyper-parameter names (``num_episodes``,
+``maximum_number_of_bikes``, ...), and the legacy flags ``--num-episodes``, ``--max-num-bikes``,
+``--min-num-bikes`` and ``--critic-mode`` are accepted. The best model is, as in ``train.py``, the one with
+the lowest validation mean daily failures.
 """
 
 from __future__ import annotations
 
 import argparse
+import logging
 import math
+import os
 import time
 from pathlib import Path
 
@@ -49,13 +56,53 @@ import pandas as pd
 
 from rl_training.agents import DQNAgent
 from rl_training.checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint
+from rl_training.logging_config import LoggingConfig, get_logger, init_logging
 from rl_training.memory import ReplayBuffer
 from rl_training.results import EpisodeResults, ResultsManager, prepare_run_dir
 from rl_training.tracking import Tracker
 from rl_training.utils import set_seed
 
 PARAMS = {"gamma": 0.95, "lr": 1e-4, "batch_size": 64, "buffer": int(1e5), "epsilon_start": 1.0,
-          "epsilon_end": 0.01, "exploration_time": 0.6, "target_every_slots": 8}
+          "epsilon_end": 0.01, "exploration_time": 0.6, "target_every_slots": 8,
+          # as in train.py: stored and passed to the agent, but both trainers copy the target network
+          # every 8 slots (the agent's soft update is disabled)
+          "soft_update": True, "tau": 0.005}
+
+
+def legacy_hyperparameters(args, params: dict, env, epsilon_decay: float, slots_per_episode: int) -> dict:
+    """``config.json`` hyper-parameters with the keys of the legacy ``train.py``, so that runs of the two
+    trainers can be compared field by field (the results webapp reads these keys), then the new ones."""
+    try:
+        depot_zone = int(env.zone_of_node[env.sim.depot_stop])
+    except Exception:   # noqa: BLE001 - informative only
+        depot_zone = None
+    legacy = {
+        "seed": args.seed,
+        "num_episodes": args.episodes,
+        "batch_size": params["batch_size"],
+        "replay_buffer_capacity": params["buffer"],
+        "gamma": params["gamma"],
+        "epsilon_start": params["epsilon_start"],
+        "epsilon_end": params["epsilon_end"],
+        "epsilon_decay": epsilon_decay,
+        "exploration_time": params["exploration_time"],
+        "lr": params["lr"],
+        "soft_update": params["soft_update"],
+        "tau": params["tau"],
+        "total_timeslots": slots_per_episode,
+        "maximum_number_of_bikes": args.fleet,
+        "minimum_number_of_bikes": args.min_num_bikes,
+        "enable_repositioning": False,
+        "use_net_flow": False,
+        "critic_mode": args.critic_mode,
+        "depot_position_id": depot_zone,
+        "initial_cell_id": depot_zone,
+        "validation_every": args.val_every,
+    }
+    extra = {k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()}
+    extra.update({"target_every_slots": params["target_every_slots"], "env": "bss_gym.GridZoneEnv",
+                  "zones": env.n_zones, "agent_len": env.agent_len, "smdp": True})
+    return {**legacy, **{k: v for k, v in extra.items() if k not in legacy}}
 
 
 class GraphState:
@@ -191,9 +238,14 @@ def main(argv=None) -> int:
     ap.add_argument("--results-path", default="results/")
     ap.add_argument("--run-id", type=int, required=True)
     ap.add_argument("--overwrite", action="store_true", help="replace an existing run with the same id without asking")
-    ap.add_argument("--episodes", type=int, default=30)
+    ap.add_argument("--episodes", "--num-episodes", dest="episodes", type=int, default=30)
     ap.add_argument("--days", type=float, default=7.0, help="episode length in days")
-    ap.add_argument("--fleet", type=int, default=340, help="bikes in the zone (Cambridge ratio: 800 per 1,824 docks)")
+    ap.add_argument("--fleet", "--max-num-bikes", dest="fleet", type=int, default=340,
+                    help="bikes in the zone (Cambridge ratio: 800 per 1,824 docks); --max-num-bikes as in bss-train")
+    ap.add_argument("--min-num-bikes", type=int, default=0, choices=[0],
+                    help="as in bss-train; the new simulator has no per-zone minimum yet, so only 0")
+    ap.add_argument("--critic-mode", default="poisson", choices=["poisson"],
+                    help="as in bss-train; the new env only forecasts (no oracle of future trips)")
     ap.add_argument("--train-dates", nargs="+", default=["2024-09-09", "2024-09-16", "2024-09-23", "2024-10-14",
                                                            "2024-10-21"])
     ap.add_argument("--eval-dates", nargs="+", default=["2024-09-30", "2024-10-07"])
@@ -229,14 +281,24 @@ def main(argv=None) -> int:
     env = make_env(args.bundle, args.train_dates, args.days, sim_config, args.cell_m)
     slots_per_episode = int(round(args.days * 8))
     T = params["exploration_time"] * args.episodes * slots_per_episode
+    epsilon_decay = T * T / math.log(10.0)
     agent = DQNAgent(num_actions=8, observation_space_len=env.agent_len, replay_buffer=ReplayBuffer(params["buffer"]),
                      gamma=params["gamma"], epsilon_start=params["epsilon_start"], epsilon_end=params["epsilon_end"],
-                     epsilon_decay=T * T / math.log(10.0), lr=params["lr"], device=args.device, seed=args.seed)
+                     epsilon_decay=epsilon_decay, lr=params["lr"], device=args.device, seed=args.seed,
+                     tau=params["tau"], soft_update=params["soft_update"])
     prepare_run_dir(args.results_path, args.run_id, resume=args.resume, overwrite=args.overwrite)   # asks (#178)
     rm = ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False)
+    hyper = legacy_hyperparameters(args, params, env, epsilon_decay, slots_per_episode)
+    reward_params = vars(env.reward_cfg)
+    # same log files as train.py: training/logs/train.log
+    init_logging(LoggingConfig(level=logging.INFO, log_dir=os.path.join(rm.training_path, "logs"),
+                               run_id=args.run_id, console=False, logger_name="train"))
+    logger = get_logger("train", logger_name="train")
+    logger.info("Starting training loop")
     ckpt_dir = rm.run_dir / "checkpoints"
     slots = {"n": 0}
-    start_episode, best, best_ep = 0, -np.inf, None
+    # best model: lowest validation mean daily failures, as in train.py
+    start_episode, best, best_ep = 0, np.inf, None
     if args.resume:
         path = latest_checkpoint(ckpt_dir)
         if path is None:
@@ -244,23 +306,23 @@ def main(argv=None) -> int:
         state = load_checkpoint(path, agent)
         start_episode = state["episode"] + 1
         slots["n"] = state["extra"].get("slots", 0)
-        best = state["extra"].get("best_val", -np.inf)
-        best_ep = state["extra"].get("best_episode")
+        if "best_val_failures" in state["extra"]:
+            best = state["extra"]["best_val_failures"]
+            best_ep = state["extra"].get("best_episode")
+        else:   # checkpoint from before the legacy-compatible best model: start the best tracker again
+            best, best_ep = np.inf, None
+        rm.best_models = [] if best_ep is None else [(best_ep, best)]
         summary = rm.training_path / "train_summary.csv"
         if summary.exists():   # keep the episodes already saved in the run summary
             rm.training_summary = pd.read_csv(summary)
             rm.training_summary = rm.training_summary[rm.training_summary["episode"] < start_episode]
         print(f"resumed from {path.name}: next episode {start_episode}, epsilon {agent.epsilon:.3f}, "
               f"buffer {len(agent.replay_buffer)}, best validation {best:.4f}", flush=True)
+        logger.info(f"Resumed from {path}: next episode {start_episode}")
     else:
-        rm.save_hyperparameters(
-            params={**params, **{k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-                    "env": "bss_gym.GridZoneEnv", "zones": env.n_zones, "agent_len": env.agent_len, "smdp": True},
-            reward_params=vars(env.reward_cfg))
+        rm.save_hyperparameters(params=hyper, reward_params=reward_params)
 
-    config = {**params, **{k: str(v) if isinstance(v, Path) else v for k, v in vars(args).items()},
-              "env": "bss_gym.GridZoneEnv", "zones": env.n_zones, "agent_len": env.agent_len, "smdp": True,
-              "reward": vars(env.reward_cfg)}
+    config = {**hyper, "reward": reward_params}
     tracker = Tracker(args.wandb, project=args.wandb_project, entity=args.wandb_entity,
                       name=f"grid-run{args.run_id:03d}", config=config, run_dir=rm.run_dir,
                       run_id=state["extra"].get("wandb_id") if args.resume else None, mode=args.wandb_mode,
@@ -271,7 +333,7 @@ def main(argv=None) -> int:
     print(f"Device: {args.device}")
     print(f"Env: GridZoneEnv on {args.bundle}: {env.n_zones} zones of {args.cell_m:g} m, "
           f"{args.days:g}-day episodes x {args.episodes}, validation every {args.val_every} on {val_date}")
-    print(f"Params: {params}")
+    print(f"Params: {hyper}")
     print("=" * 80, flush=True)
     # progress bar as in the legacy trainer: one tick per 3-hour slot, simulated clock in the description
     bar = tqdm(total=slots_per_episode * args.episodes, initial=slots_per_episode * start_episode,
@@ -300,13 +362,16 @@ def main(argv=None) -> int:
         bar.refresh()
         rm.save_episode(res)
         rm.save_run_summary()
-        out(f"ep {ep:3d} return {s['return']:9.1f} served {s['city_service_level']:.3f} moved {s['bikes_moved']:5d} "
-              f"invalid {s['invalid']:5d}/{s['decisions']:5d} eps {s['epsilon']:.3f} loss {s['loss']:.4f} "
-              f"wall {s['wall_s']:.0f}s")
+        line = (f"ep {ep:3d} return {s['return']:9.1f} served {s['city_service_level']:.3f} "
+                f"failures/day {res.mean_daily_failures:7.1f} moved {s['bikes_moved']:5d} "
+                f"invalid {s['invalid']:5d}/{s['decisions']:5d} eps {s['epsilon']:.3f} loss {s['loss']:.4f} "
+                f"wall {s['wall_s']:.0f}s")
+        out(line)
+        logger.info(line)
         tracker.log({f"train/{k}": v for k, v in s.items()} | {"train/mean_daily_failures": res.mean_daily_failures,
                     "train/buffer": len(agent.replay_buffer)}, step=ep)
-        if (ep + 1) % args.save_every == 0 or ep == args.episodes - 1:
-            agent.save_model(rm.models_path / f"model_episode_{ep:03d}.pt")
+        if (ep + 1) % args.save_every == 0 or ep == args.episodes - 1:   # models/episodes/episode_NNN/
+            rm.save_model(agent, ep, res.mean_daily_failures, model_type="episode")
         if args.val_every and (ep + 1) % args.val_every == 0:
             if val_env is None:
                 val_env = make_env(args.bundle, [val_date], args.days, sim_config, args.cell_m)
@@ -315,20 +380,27 @@ def main(argv=None) -> int:
             vres, vs = run_episode(val_env, agent, seed=20_000, device=args.device, learn=False, params=params,
                                    cell_m=args.cell_m, episode=0, mode="validation")
             agent.epsilon = saved_eps
-            ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False, mode="validation",
-                           val_tag=f"episode_{ep:03d}").save_episode(vres)
-            improved = vs["city_service_level"] > best
+            vrm = ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False, mode="validation",
+                                 val_tag=f"episode_{ep:03d}")
+            vrm.save_hyperparameters(params={**hyper, "validation_date": val_date, "validation_seed": 20_000},
+                                     reward_params=reward_params)
+            vrm.save_episode(vres)
+            score = vres.mean_daily_failures
+            improved = score < best
             tracker.log({f"val/{k}": vs[k] for k in ("city_service_level", "failed", "return", "bikes_moved",
-                                                       "invalid", "truck_km")}, step=ep)
+                                                       "invalid", "truck_km")}
+                        | {"val/mean_daily_failures": score}, step=ep)
             if improved:
-                best = vs["city_service_level"]
-                best_ep = ep
-                agent.save_model(rm.models_path / "model_best.pt")
-                tracker.summary({"best/val_city_service_level": best, "best/episode": ep})
-            out(f"val ep {ep:3d} ({val_date}): served {vs['city_service_level']:.4f} failures {vs['failed']} "
-                f"{'NEW BEST' if improved else f'best {best:.4f}'}")
+                best, best_ep = score, ep
+                rm.save_model(agent, ep, score, model_type="best")   # models/best/ + best_models_summary.csv
+                tracker.summary({"best/val_mean_daily_failures": best, "best/episode": ep,
+                                 "best/val_city_service_level": vs["city_service_level"]})
+            line = (f"val ep {ep:3d} ({val_date}): failures/day {score:.2f} served {vs['city_service_level']:.4f} "
+                    f"{'NEW BEST' if improved else f'best {best:.2f} (ep {best_ep})'}")
+            out(line)
+            logger.info(f"[val] {line}")
         if args.checkpoint_every and (ep + 1) % args.checkpoint_every == 0:
-            save_checkpoint(ckpt_dir, agent, {"slots": slots["n"], "best_val": best, "best_episode": best_ep,
+            save_checkpoint(ckpt_dir, agent, {"slots": slots["n"], "best_val_failures": best, "best_episode": best_ep,
                                               "wandb_id": tracker.id},
                             episode=ep, buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
     bar.close()
@@ -336,19 +408,25 @@ def main(argv=None) -> int:
         print(f"stopped after episode {stop_at - 1}; continue with --resume", flush=True)
         tracker.finish()
         return 0
-    agent.save_model(rm.models_path / "model_final.pt")
+    rm.save_run_summary()
+    last = rm.training_summary["mean_daily_failures"].iloc[-1] if len(rm.training_summary) else float("nan")
+    final_path = rm.save_model(agent, args.episodes - 1, float(last), model_type="final")
+    logger.info("Training finished")
     # W&B keeps one model per run: the best by validation, uploaded once (issue #174)
-    if (rm.models_path / "model_best.pt").exists():
-        tracker.log_model(rm.models_path / "model_best.pt", ["best"],
-                          {"episode": best_ep, "val_city_service_level": best, "val_date": val_date})
+    best_path = rm.get_best_model_path()
+    if best_path is not None:
+        tracker.log_model(best_path, ["best"],
+                          {"episode": best_ep, "val_mean_daily_failures": best, "val_date": val_date})
     else:   # no validation ran: the final model is the best we have
-        tracker.log_model(rm.models_path / "model_final.pt", ["best"],
+        tracker.log_model(final_path, ["best"],
                           {"episode": args.episodes - 1, "note": "no validation; final model"})
 
     # greedy evaluation on held-out weeks, as the webapp's validation view
     eval_env = make_env(args.bundle, args.eval_dates, args.days, sim_config, args.cell_m)
     val = ResultsManager(args.results_path, args.run_id, overwrite=True, interactive=False, mode="validation",
                          val_tag=f"final_episode_{args.episodes - 1:03d}")
+    val.save_hyperparameters(params={**hyper, "eval_dates": args.eval_dates, "eval_seeds": args.eval_seeds},
+                             reward_params=reward_params)
     i = 0
     final_eval = []
     ebar = tqdm(total=len(args.eval_dates) * args.eval_seeds, desc=f"[EVAL] Run {args.run_id}", leave=True,

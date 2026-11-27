@@ -140,9 +140,23 @@ optimizer, epsilon, the RNG states and the replay buffer; the last 2 are kept an
   the trainer stops instead of asking. `--resume` keeps the run (issue #178).
 
 **Best model.** `train_grid` validates the greedy policy every `--val-every 5` episodes on a held-out
-week (`--val-date`) and keeps the best as `models/model_best.pt`. DQN performance oscillates, so the
-last weights are often not the best. `bss-train` does the same with its validation subprocesses
-(`models/best/`), unless `--one-validation` is given.
+week (`--val-date`) and keeps the one with the lowest mean daily failures in `models/best/`. DQN
+performance oscillates, so the last weights are often not the best. `bss-train` does the same with its
+validation subprocesses, unless `--one-validation` is given.
+
+**Same output for both trainers.** `train_grid` writes the legacy layout, so the results webapp shows
+both the same way:
+- `training/config.json` with the legacy hyper-parameter names (`num_episodes`,
+  `maximum_number_of_bikes`, `soft_update`, ...), then the new ones;
+- `training/logs/train.log`;
+- `validation/episode_NNN/config.json`;
+- `models/episodes/`, `models/best/` and `models/final/`, each with its `metadata.json`, plus
+  `best_models_summary.csv`.
+
+It also accepts the legacy flags `--num-episodes`, `--max-num-bikes`, `--min-num-bikes` (0 only: the
+new simulator has no per-zone minimum) and `--critic-mode` (`poisson` only: the new env never sees
+future trips). Both trainers copy the target network every 8 slots; `soft_update`/`tau` are recorded
+but unused, as in `train.py`.
 
 ### Weights & Biases
 
