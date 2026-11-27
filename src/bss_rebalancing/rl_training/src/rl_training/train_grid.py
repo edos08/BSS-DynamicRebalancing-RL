@@ -203,6 +203,9 @@ def main(argv=None) -> int:
     ap.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--gamma", type=float, default=PARAMS["gamma"])
+    ap.add_argument("--exploration-time", type=float, default=PARAMS["exploration_time"],
+                    help="fraction of the training spent exploring (epsilon ~0.1 at its end), as in bss-train")
+    ap.add_argument("--lr", type=float, default=PARAMS["lr"])
     ap.add_argument("--save-every", type=int, default=5, help="save the model every N episodes")
     ap.add_argument("--checkpoint-every", type=int, default=1, help="save a full training checkpoint every N episodes")
     ap.add_argument("--keep-checkpoints", type=int, default=2)
@@ -218,7 +221,7 @@ def main(argv=None) -> int:
     ap.add_argument("--wandb-entity", default=None)
     ap.add_argument("--wandb-mode", default="online", choices=["online", "offline"])
     args = ap.parse_args(argv)
-    params = {**PARAMS, "gamma": args.gamma}
+    params = {**PARAMS, "gamma": args.gamma, "exploration_time": args.exploration_time, "lr": args.lr}
     set_seed(args.seed)
     sim_config = {"mode": args.mode, "fleet": {"size": args.fleet}}
     if args.mode == "docked":

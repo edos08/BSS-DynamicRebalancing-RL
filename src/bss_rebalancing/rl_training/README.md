@@ -112,8 +112,8 @@ python scripts/clip_osm.py
 bss-scenario build configs/scenarios/cambridge-se-2024.yaml --out data/scenarios/cambridge-se-2024
 bss-scenario demand data/scenarios/cambridge-se-2024
 
-python -m rl_training.train_grid --bundle data/scenarios/cambridge-se-2024 --results-path results/ \
-    --run-id 2 --episodes 30 --device cuda:0
+bss-train-grid --run-id 2 --episodes 30    # = python -m rl_training.train_grid; defaults: the SE bundle, results/
+# same knobs as bss-train where they exist: --exploration-time, --gamma, --lr, --fleet (bikes), --device
 ```
 
 Trains the same agent and network on `bss_gym.GridZoneEnv` (issue #166), with the legacy

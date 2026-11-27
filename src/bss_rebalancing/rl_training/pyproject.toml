@@ -65,6 +65,7 @@ dev = [
 
 [project.scripts]
 bss-train = "rl_training.train:main"
+bss-train-grid = "rl_training.train_grid:main"
 bss-validate = "rl_training.validate:main"
 
 [project.urls]
