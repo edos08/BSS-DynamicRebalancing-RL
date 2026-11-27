@@ -58,6 +58,41 @@ class EpisodeResults:
     cell_subgraph: Optional[nx.Graph] = None
 
 
+def prepare_run_dir(results_path: str | Path, run_id: int, resume: bool = False, overwrite: bool = False,
+                    ask=None, interactive: bool | None = None) -> Path:
+    """Make ``results_path/run_NNN`` ready for a new training run (issue #178).
+
+    * ``resume``: an existing run is kept as is.
+    * The run exists and is not empty: ask ``Overwrite it? [y/N]``. Yes (or ``overwrite``) deletes
+      the whole run directory (training, validation, models, checkpoints, local W&B files); anything
+      else stops with :class:`SystemExit` and a hint.
+    * No terminal to ask in (``interactive`` false, e.g. ``nohup``): stop unless ``overwrite``.
+    """
+    import sys
+    run_dir = Path(results_path) / f"run_{run_id:03d}"
+    if resume or not run_dir.exists() or not any(run_dir.iterdir()):
+        return run_dir
+    if not overwrite:
+        episodes = len(list((run_dir / "training").glob("episode_*")))
+        parts = sorted(d.name for d in run_dir.iterdir() if d.is_dir())
+        summary = f"{episodes} training episodes; " if episodes else ""
+        print(f"Run {run_id} already exists: {run_dir} ({summary}{', '.join(parts) or 'files'}).")
+        if interactive is None:
+            interactive = sys.stdin.isatty()
+        if not interactive:
+            raise SystemExit(f"Run {run_id} exists and there is no terminal to ask: pass --overwrite to replace it, "
+                             f"--resume to continue it, or another --run-id.")
+        try:
+            answer = (ask or input)(f"Overwrite run {run_id}? Everything in {run_dir} will be deleted. [y/N] ")
+        except EOFError:
+            answer = ""
+        if answer.strip().lower() not in ("y", "yes"):
+            raise SystemExit(f"Kept run {run_id}. Use another --run-id, or --resume to continue it.")
+    shutil.rmtree(run_dir)
+    print(f"Deleted {run_dir}.")
+    return run_dir
+
+
 class ResultsManager:
     """Centralized manager for training and validation results."""
 

@@ -112,8 +112,8 @@ python scripts/clip_osm.py
 bss-scenario build configs/scenarios/cambridge-se-2024.yaml --out data/scenarios/cambridge-se-2024
 bss-scenario demand data/scenarios/cambridge-se-2024
 
-python -m rl_training.train_grid --bundle data/scenarios/cambridge-se-2024 --results-path results/ \
-    --run-id 2 --episodes 30 --device cuda:0
+bss-train-grid --run-id 2 --episodes 30    # = python -m rl_training.train_grid; defaults: the SE bundle, results/
+# same knobs as bss-train where they exist: --exploration-time, --gamma, --lr, --fleet (bikes), --device
 ```
 
 Trains the same agent and network on `bss_gym.GridZoneEnv` (issue #166), with the legacy
@@ -134,11 +134,31 @@ optimizer, epsilon, the RNG states and the replay buffer; the last 2 are kept an
 - `--checkpoint-every N`, `--keep-checkpoints K`, and `--no-buffer-checkpoint` (smaller files; the
   replay buffer restarts empty) change what is saved.
 - `train_grid --stop-after N` stops after N episodes, to train in slices.
+- **Existing run id.** If `results/run_NNN` already exists, both trainers ask `Overwrite run N? [y/N]`.
+  Yes deletes the whole run (training, validation, models, checkpoints, local W&B files); anything
+  else stops and keeps it. `--overwrite` replaces it without asking; with no terminal (e.g. `nohup`)
+  the trainer stops instead of asking. `--resume` keeps the run (issue #178).
 
 **Best model.** `train_grid` validates the greedy policy every `--val-every 5` episodes on a held-out
-week (`--val-date`) and keeps the best as `models/model_best.pt`. DQN performance oscillates, so the
-last weights are often not the best. `bss-train` does the same with its validation subprocesses
-(`models/best/`), unless `--one-validation` is given.
+week (`--val-date`) and keeps the one with the lowest mean daily failures in `models/best/`. DQN
+performance oscillates, so the last weights are often not the best. `bss-train` does the same with its
+validation subprocesses, unless `--one-validation` is given.
+
+**Same output for both trainers.** `train_grid` writes the legacy layout, so the results webapp shows
+both the same way:
+- `training/config.json` with the legacy hyper-parameter names (`num_episodes`,
+  `maximum_number_of_bikes`, `soft_update`, ...), then the new ones;
+- `training/logs/train.log`;
+- `validation/episode_NNN/config.json`;
+- `models/episodes/`, `models/best/` and `models/final/`, each with its `metadata.json`, plus
+  `best_models_summary.csv`.
+
+It also accepts the legacy flags `--num-episodes`, `--critic-mode` (`poisson` only: the new env never
+sees future trips) and the initial-state flags, with the same rules and defaults as `bss-train`:
+`--max-num-bikes` (whole fleet, 15 on the truck), `--min-num-bikes` per zone, the rest in the depot or
+spread with `--enable-repositioning` (`--use-net-flow`: by the forecast net outflow of the first slot).
+The reward is the legacy one, failures included: total failures / slots in the last step. Both trainers copy the target network every 8 slots; `soft_update`/`tau` are recorded
+but unused, as in `train.py`.
 
 ### Weights & Biases
 
@@ -151,7 +171,7 @@ Add `--wandb` (and optionally `--wandb-project bss-rebalancing`, `--wandb-entity
 Only the **best model** of each run (by validation) is uploaded, once at the end of training, as one
 artifact with alias `best`, and its episode and score as metadata (issue #174). Checkpoints and the
 other models stay in `results/run_NNN/`. A resumed run (`--resume`) continues
-the same W&B run. Install the extra with `pip install -e "src/bss_rebalancing/rl_training[tracking]"`.
+the same W&B run. W&B runs silently: the trainer prints one line with the run link. Install the extra with `pip install -e "src/bss_rebalancing/rl_training[tracking]"`.
 
 **API key**: put `export WANDB_API_KEY=...` in `~/.config/bss-rl/secrets.sh` and `source` it
 before training, or run `wandb login` once. The code never prints or stores the key. In offline

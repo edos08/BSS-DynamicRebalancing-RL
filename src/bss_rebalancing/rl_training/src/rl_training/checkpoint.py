@@ -41,9 +41,12 @@ def rng_state() -> dict:
 def set_rng_state(state: dict) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch"])
+    # RNG states are CPU ByteTensors; torch.load(map_location="cuda") moves them to the GPU (#180)
+    torch.set_rng_state(state["torch"].cpu())
     if "cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["cuda"])
+        cuda = [s.cpu() for s in state["cuda"]][:torch.cuda.device_count()]   # visible devices may differ
+        for i, s in enumerate(cuda):
+            torch.cuda.set_rng_state(s, i)
 
 
 def save_checkpoint(folder: str | Path, agent, extra: dict, episode: int, buffer: bool = True,

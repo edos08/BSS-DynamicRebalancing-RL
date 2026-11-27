@@ -27,7 +27,7 @@ from rl_training.agents import DQNAgent
 from rl_training.checkpoint import latest_checkpoint, load_checkpoint, save_checkpoint
 from rl_training.tracking import Tracker
 from rl_training.memory import ReplayBuffer
-from rl_training.results import ResultsManager, EpisodeResults
+from rl_training.results import ResultsManager, EpisodeResults, prepare_run_dir
 from rl_training.logging_config import init_logging, LoggingConfig, get_logger
 from rl_training.utils import (
     convert_graph_to_data,
@@ -233,6 +233,8 @@ def create_parser() -> argparse.ArgumentParser:
         action='store_true',
         help='Do not save the replay buffer in checkpoints (a resume then starts with an empty buffer).'
     )
+    parser.add_argument('--overwrite', action='store_true',
+                        help='Replace an existing run with the same id without asking.')
     parser.add_argument('--wandb', action='store_true', help='Track the run with Weights & Biases.')
     parser.add_argument('--wandb-project', type=str, default='bss-rebalancing')
     parser.add_argument('--wandb-entity', type=str, default=None)
@@ -708,11 +710,12 @@ def main():
     # ------------------------------------------------------------------
     # ResultsManager
     # ------------------------------------------------------------------
+    prepare_run_dir(results_path, run_id, resume=args.resume, overwrite=args.overwrite)   # asks (#178)
     results_manager = ResultsManager(
         results_path=results_path,
         run_id=run_id,
-        overwrite=args.resume,
-        interactive=not args.resume
+        overwrite=True,
+        interactive=False
     )
     checkpoint_dir = results_manager.run_dir / "checkpoints"
 

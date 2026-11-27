@@ -36,13 +36,21 @@ them as ``R = sum_i gamma^i r_i`` and the next state by ``gamma^tau`` (issue #16
 **Critic** (legacy formula, ``critic = -1 + exp((1 + 0.2 a)(1 - bikes / expected))``):
 ``expected = max(D - A, 0) + min_bikes`` and ``a = A``. ``D`` and ``A`` are the forecast departures
 and arrivals of the zone over the next ``critic_window_s`` (3 h), from ``sim.forecast`` (no oracle),
-refreshed every ``forecast_every_s``. A zone is critical above 0.05. Unlike the legacy cumulative
-peak, the window's net outflow is used.
+refreshed every ``forecast_every_s``. Unlike the legacy cumulative peak, the window's net outflow is
+used. With ``binary_critic`` (default, the legacy ``USE_BINARY_CRITIC`` of the paper runs) a zone with
+a positive score is critical and scores 1, and the global critic is the number of critical zones.
+Without it the raw score is used (critical above 0.05), up to e^10 per zone, which makes the
+change-of-global-critic reward term reach +-10^4 per step.
 
-**Reward** (:class:`RewardConfig`): the legacy shaped reward of the action (drop or pick-up by
-criticality, charge usefulness, eligibility, stay, loops, deployment, change of global critic),
-counted in the action's first step, plus **minus ``failure_weight`` per failed request** in every
-30 s step of the action. Failures are now a per-step cost rather than an end-of-episode lump.
+**Reward** (:class:`RewardConfig`): the legacy reward. The shaped reward of the action (drop or
+pick-up by criticality, charge usefulness, eligibility, stay, loops, deployment, change of global
+critic) is counted in the action's first step, and the failures, as in the legacy env, once in the
+episode's last step: minus total failures / 3-hour slots of the episode. ``failure_weight`` > 0 adds a
+per-step cost per failed request instead (``final_failure_penalty=False`` drops the lump).
+
+**Initial state** (:class:`InitialBikes`, optional): the legacy one, fleet size, minimum bikes per
+zone, the rest in the depot or spread over the zones. Without it the simulator's own distribution
+(``fleet.initial_distribution``) is used.
 
 **Episodes** last ``episode_days`` from a start chosen in ``start_dates`` (one per reset, from the
 reset seed). They end by time limit: ``truncated`` is true and ``terminated`` stays false.
@@ -60,6 +68,7 @@ import numpy as np
 from bss_sim.commands import Drop, GoTo, PickUp, SwapBattery, Wait
 from bss_sim.config import SimConfig
 from bss_sim.engine import TimeLimit
+from bss_sim.scenario import Scenario
 from bss_sim.simulator import Simulator
 from bss_sim.state import DEPOT, ELECTRIC, PARKED
 from bss_sim.zones import grid_zones
@@ -101,7 +110,25 @@ class RewardConfig:
     deploy_weight: float = 0.02
     depot_weight: float = 0.02
     global_critic_weight: float = 0.5
-    failure_weight: float = 0.02        # per failed request, in the 30 s step it happens
+    failure_weight: float = 0.0         # per failed request, in the 30 s step it happens (0: off)
+    final_failure_penalty: bool = True  # legacy: minus total failures / slots in the episode's last step
+
+
+@dataclass(frozen=True)
+class InitialBikes:
+    """Legacy initial state (``FullyDynamicEnv._bike_repositioning``, flags of ``bss-train``).
+
+    ``max_bikes`` is the whole fleet: the truck starts with ``trucks.initial_load`` of them (15),
+    every zone gets ``min_bikes_per_zone`` at its stop (lowered to ``available // zones`` if the fleet
+    is too small), and the rest waits in the depot. With ``enable_repositioning`` the rest is spread
+    over the zones too: by the forecast net outflow of the first 3 h slot with ``use_net_flow``
+    (the legacy env read the realised trips), the remainder at random.
+    """
+
+    max_bikes: int = 500
+    min_bikes_per_zone: int = 1
+    enable_repositioning: bool = False
+    use_net_flow: bool = False
 
 
 @dataclass
@@ -119,13 +146,17 @@ class GridZoneEnv(gym.Env):
                  episode_days: float = 7.0, cell_m: float = 300.0, step_s: float = 30.0,
                  radius_m: float = 250.0, critic_window_s: float = 3 * 3600.0, forecast_every_s: float = 900.0,
                  min_bikes: int = 1, reward: RewardConfig | None = None, eligibility_decay: float = 0.9968,
-                 border_eligibility_decay: float = 0.99, slot_s: float = 3 * 3600.0):
+                 border_eligibility_decay: float = 0.99, slot_s: float = 3 * 3600.0, binary_critic: bool = True,
+                 initial_bikes: InitialBikes | None = None):
         cfg = sim_config if isinstance(sim_config, SimConfig) else SimConfig.from_dict(sim_config or {})
         if cfg.trucks.count != 1:
             cfg = cfg.replace(**{"trucks.count": 1})
-        self.sim = Simulator.from_scenario(bundle, cfg)
-        sc = self.sim.scenario
+        sc = Scenario.load(bundle, mode=cfg.mode)
         self.zones = grid_zones(sc, cell_m)
+        self.initial_bikes = initial_bikes
+        if initial_bikes is not None:
+            cfg = self._legacy_fleet_config(cfg, initial_bikes, self.zones.n)
+        self.sim = Simulator(sc, cfg)
         self.sim.add_partition(self.zones.name, self.zones.node_to_zone)
         self.start_dates = tuple(start_dates)
         self.start_hour = start_hour
@@ -139,6 +170,7 @@ class GridZoneEnv(gym.Env):
         self.decay = eligibility_decay
         self.border_decay = border_eligibility_decay
         self.slot_s = slot_s
+        self.binary_critic = binary_critic
         self._build_grid(cell_m)
         Z = self.zones.n
         self.n_zones = Z
@@ -150,6 +182,43 @@ class GridZoneEnv(gym.Env):
         })
         self._weights = sc.departure_weights()
         self.fleet_total = None
+
+    # ---------------------------------------------------------------------- initial bikes
+    def _legacy_fleet_config(self, cfg: SimConfig, ib: InitialBikes, Z: int) -> SimConfig:
+        available = ib.max_bikes - cfg.trucks.initial_load
+        if available < 0:
+            raise ValueError(f"max_bikes {ib.max_bikes} is smaller than the truck's initial load")
+        base = ib.min_bikes_per_zone
+        if base * Z > available:          # legacy: base lowered so that every zone gets the same
+            base = available // Z
+        remaining = available - base * Z
+        street = base * Z + (remaining if ib.enable_repositioning else 0)
+        self._base_per_zone, self._remaining = base, remaining
+        return cfg.replace(**{"fleet.size": street, "fleet.initial_distribution": "from_snapshot",
+                              "trucks.depot_spare_bikes": available - street})
+
+    def _legacy_snapshot(self, seed: int, start) -> np.ndarray:
+        """Initial node of every street bike: the zone stops, as the legacy cell centre stations."""
+        ib, Z = self.initial_bikes, self.zones.n
+        counts = np.full(Z, self._base_per_zone, dtype=np.int64)
+        if ib.enable_repositioning and self._remaining > 0:
+            placed = 0
+            if ib.use_net_flow:
+                # forecast flows of the first slot need a running sim: start it with a provisional snapshot
+                provisional = np.full(self.sim.config.fleet.size, self.zones.stop[0], dtype=np.int32)
+                self.sim.reset(seed=seed, start=start, snapshot=provisional)
+                self.sim.run(TimeLimit(0))
+                fc = self.sim.forecast(self.slot_s, self.zones.name)
+                flow = np.asarray(fc.arrivals, float) - np.asarray(fc.departures, float)
+                neg = flow[flow < 0].sum()
+                if neg < 0:
+                    add = np.where(flow < 0, (flow / neg * self._remaining).astype(np.int64), 0)
+                    counts += add
+                    placed = int(add.sum())
+            leftover = self._remaining - placed
+            if leftover > 0:
+                np.add.at(counts, self.np_random.choice(Z, size=leftover, replace=True), 1)
+        return np.repeat(np.asarray(self.zones.stop, dtype=np.int32), counts)
 
     # ------------------------------------------------------------------------------ grid
     def _build_grid(self, cell_m: float) -> None:
@@ -196,7 +265,8 @@ class GridZoneEnv(gym.Env):
             day = self.start_dates[int(rng.integers(len(self.start_dates)))]
             start = dt.datetime.fromisoformat(day) + dt.timedelta(hours=self.start_hour)
         sim_seed = int(options.get("sim_seed", rng.integers(2**31)))
-        self.sim.reset(seed=sim_seed, start=start)
+        snapshot = None if self.initial_bikes is None else self._legacy_snapshot(sim_seed, start)
+        self.sim.reset(seed=sim_seed, start=start, snapshot=snapshot)
         self.sim.run(TimeLimit(0))                     # drain the start notifications
         self.t_end = self.sim.now + self.episode_s
         self.fleet_total = self.sim.fleet.n - self.sim.config.external.reservoir
@@ -227,13 +297,22 @@ class GridZoneEnv(gym.Env):
         self.bikes = bikes
         with np.errstate(over="ignore"):
             expo = np.minimum((1.0 + 0.2 * self._after) * (1.0 - bikes / self._expected), 10.0)
-            critic = np.where(self._expected > 0, -1.0 + np.exp(expo), -bikes)
-        self.critic = critic
-        self.critical = critic > CRITIC_THRESHOLD
-        self.global_critic = float(np.maximum(critic, 0.0).sum())
-        t = 0.67   # legacy surplus threshold
-        surplus = bikes - np.floor(bikes * (1 + critic) * (1 - t) / (1 + critic * (1 - t) / t))
-        self.surplus = np.where(critic > -t, 0.0, np.maximum(surplus, 0.0))
+            raw = np.where(self._expected > 0, -1.0 + np.exp(expo), -bikes)
+        self.raw_critic = raw
+        if self.binary_critic:
+            # legacy USE_BINARY_CRITIC (the paper setting): a zone with a positive score is critical and
+            # scores 1; the global critic counts critical zones. Without it the score is exp(...) - 1, up
+            # to e^10 per zone, and the -0.5 * delta(global critic) reward term reaches +-10^4 per step.
+            self.critic = np.where(raw > 0.0, 1.0, raw)
+            self.critical = raw > 0.0
+            self.global_critic = float(self.critical.sum())
+        else:
+            self.critic = raw
+            self.critical = raw > CRITIC_THRESHOLD
+            self.global_critic = float(np.maximum(raw, 0.0).sum())
+        t = 0.67   # legacy surplus threshold (on the raw score, as in Cell.set_surplus_bikes)
+        surplus = bikes - np.floor(bikes * (1 + raw) * (1 - t) / (1 + raw * (1 - t) / t))
+        self.surplus = np.where(raw > -t, 0.0, np.maximum(surplus, 0.0))
 
     # ----------------------------------------------------------------------------- step
     def _command(self, action: int):
@@ -305,6 +384,10 @@ class GridZoneEnv(gym.Env):
         self.last_border = float(self.borders(z1).sum())
 
         truncated = sim.now >= self.t_end
+        if truncated and rc.final_failure_penalty:
+            # legacy: reward -= total_failures / total_timeslots, in the last step of the episode
+            failed = float(sum(sim.kpis_.failures[:5]) - sum(self._failed0[:5]))
+            step_rewards[-1] -= failed / max(self.episode_s / self.slot_s, 1.0)
         slot = int(sim.now // self.slot_s)
         slot_end = slot != self.slot
         self.slot = slot

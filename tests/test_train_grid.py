@@ -28,10 +28,14 @@ def test_train_grid_runs_and_stores_smdp_transitions(tmp_path, monkeypatch):
         d = run / "training" / f"episode_{ep:03d}"
         assert {"scalars.json", "timeslot_metrics.csv", "step_data.pkl.gz", "cell_subgraph.gpickle"} <= \
             {p.name for p in d.iterdir()}
-    assert (run / "models" / "model_final.pt").exists()
+    assert (run / "models" / "final" / "trained_agent.pt").exists()
     assert (run / "validation" / "final_episode_001" / "episode_000" / "scalars.json").exists()
     cfg = json.loads((run / "training" / "config.json").read_text())
     assert cfg["hyperparameters"]["smdp"] is True and cfg["hyperparameters"]["gamma"] == 0.95
+    # same hyper-parameter keys as the legacy train.py (the results webapp reads them)
+    for key in ("seed", "num_episodes", "batch_size", "lr", "gamma", "exploration_time", "soft_update", "tau",
+                "enable_repositioning", "use_net_flow", "maximum_number_of_bikes", "minimum_number_of_bikes"):
+        assert key in cfg["hyperparameters"], key
     assert all(s >= 1 for _, s, _, _ in pushed) and any(s > 1 for _, s, _, _ in pushed)   # multi-step actions
     assert not any(t for *_, t in pushed)              # time limit: truncated, never terminal
     assert pushed[-1][2] is True                        # the last transition of an episode is done
@@ -51,16 +55,16 @@ def test_resume_continues_exactly(tmp_path):
     assert train_grid.main(common + ["--run-id", "1"]) == 0
     assert train_grid.main(common + ["--run-id", "2", "--stop-after", "2"]) == 0
     run2 = tmp_path / "res" / "run_002"
-    assert not (run2 / "models" / "model_final.pt").exists() and (run2 / "checkpoints" / "last.pt").exists()
+    assert not (run2 / "models" / "final" / "trained_agent.pt").exists() and (run2 / "checkpoints" / "last.pt").exists()
     assert train_grid.main(common + ["--run-id", "2", "--resume"]) == 0
     for ep in range(3):
         a = json.loads((tmp_path / "res" / "run_001" / "training" / f"episode_{ep:03d}" / "scalars.json").read_text())
         b = json.loads((run2 / "training" / f"episode_{ep:03d}" / "scalars.json").read_text())
         assert a == b, ep                                # the resumed run is identical to the straight one
-    m1 = torch.load(tmp_path / "res" / "run_001" / "models" / "model_final.pt", weights_only=True)
-    m2 = torch.load(run2 / "models" / "model_final.pt", weights_only=True)
+    m1 = torch.load(tmp_path / "res" / "run_001" / "models" / "final" / "trained_agent.pt", weights_only=True)
+    m2 = torch.load(run2 / "models" / "final" / "trained_agent.pt", weights_only=True)
     assert all(torch.equal(m1["train_model"][k], m2["train_model"][k]) for k in m1["train_model"])
-    assert (run2 / "models" / "model_best.pt").exists()
+    assert (run2 / "models" / "best" / "metadata.json").exists()
     assert (run2 / "validation" / "episode_001" / "episode_000" / "scalars.json").exists()
     import pandas as pd
     assert pd.read_csv(run2 / "training" / "train_summary.csv")["episode"].tolist() == [0, 1, 2]

@@ -5,6 +5,11 @@ Reinforcement Learning training and validation module for the BSS Dynamic Rebala
 """
 
 __version__ = "1.0.0"
+
+import warnings
+
+# torch_geometric 2.8 calls torch.jit.script at import, deprecated in torch 2.15: harmless, not ours.
+warnings.filterwarnings("ignore", message=r"`torch\.jit\.script` is deprecated", category=FutureWarning)
 __author__ = "Edoardo Scarpel"
 
 from rl_training.agents import DQNAgent

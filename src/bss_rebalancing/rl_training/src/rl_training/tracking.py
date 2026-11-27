@@ -17,6 +17,7 @@ A resumed run (``--resume``) continues the same W&B run: its id is saved in the 
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -34,11 +35,15 @@ class Tracker:
         except ImportError as exc:
             raise SystemExit('--wandb needs the wandb package: pip install "bss-rl-training[tracking]"') from exc
         self._wandb = wandb
+        os.environ.setdefault("WANDB_SILENT", "true")          # also silences the login line
         if run_dir is not None:
             Path(run_dir).mkdir(parents=True, exist_ok=True)
+        # silent: no wandb banner or upload chatter; one line of our own instead (errors still raise)
         self.run = wandb.init(project=project, entity=entity, name=name, config=config or {},
                               dir=str(run_dir) if run_dir else None, id=run_id, resume="allow", mode=mode,
-                              tags=list(tags), group=group)
+                              tags=list(tags), group=group, settings=wandb.Settings(silent=True))
+        where = self.run.url if mode != "offline" and self.run.url else f"offline, {self.run.dir}"
+        print(f"W&B: {self.run.name} ({where})", flush=True)
 
     @property
     def enabled(self) -> bool:

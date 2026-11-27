@@ -100,3 +100,60 @@ def test_critic_and_failure_penalty(bundle):
     assert fails > 0 and all(p <= 0 for p in pen)
     assert np.isfinite(env.critic).all() and env.critical.dtype == bool
     assert env.global_critic >= 0
+
+
+def test_binary_critic_as_legacy(bundle):
+    """Default critic is the legacy binary one: critical zones score 1, global = their count, and the
+    shaped reward stays on the legacy scale (the raw exp score made it reach +-10^4)."""
+    env = make(bundle)
+    assert env.binary_critic
+    env.reset(seed=3)
+    rng = np.random.default_rng(0)
+    for _ in range(200):
+        _, r, _, truncated, _ = env.step(int(rng.integers(8)))
+        crit = env.critic
+        assert np.all((crit == 1.0) | (crit <= 0.0))
+        assert np.array_equal(env.critical, env.raw_critic > 0.0)
+        assert env.global_critic == float(env.critical.sum()) <= env.n_zones
+        if truncated:
+            break
+    raw = make(bundle, binary_critic=False)
+    raw.reset(seed=3)
+    assert raw.global_critic == pytest.approx(float(np.maximum(raw.raw_critic, 0.0).sum()))
+
+
+def test_failures_penalised_once_at_the_end_as_legacy(bundle):
+    """Legacy reward: no per-step failure cost; minus total failures / slots in the last step."""
+    env = make(bundle, days=0.5)
+    env.reset(seed=5)
+    fails, done = 0, False
+    while not done:
+        *_, trunc, info = env.step(STAY)
+        fails += sum(info["failures"])
+        if not trunc:   # before the end, failures cost nothing
+            assert all(r == 0.0 for r in info["step_rewards"][1:])
+        done = trunc
+    slots = env.episode_s / env.slot_s
+    assert fails > 0
+    # STAY's shaped reward is small; the lump dominates the last step
+    assert info["step_rewards"][-1] <= -fails / slots + 2.0
+
+
+@pytest.mark.parametrize("min_bikes,repos,street,depot", [(0, False, 0, None), (1, False, "Z", None),
+                                                          (1, True, None, 0), (10**6, False, None, None)])
+def test_legacy_initial_bikes(bundle, min_bikes, repos, street, depot):
+    from bss_gym import InitialBikes
+    env = make(bundle, initial_bikes=InitialBikes(max_bikes=60, min_bikes_per_zone=min_bikes,
+                                                  enable_repositioning=repos))
+    env.reset(seed=1)
+    f, Z = env.sim.fleet, env.n_zones
+    on_street, in_depot, on_truck = f.status_count[0], f.status_count[4], len(env.sim.trucks[0].load)
+    assert on_truck + on_street + in_depot == 60 == env.fleet_total
+    if street == "Z":
+        assert on_street == Z and np.all(env.bikes == 1)
+    elif street is not None:
+        assert on_street == street
+    if depot is not None:
+        assert in_depot == depot
+    if min_bikes == 10**6:   # fleet too small: the same lowered number in every zone
+        assert np.all(env.bikes == env.bikes[0]) and in_depot < Z
