@@ -43,6 +43,7 @@ import numpy as np
 import torch
 from shapely.geometry import box
 from torch_geometric.data import Data
+from tqdm import tqdm
 
 import pandas as pd
 
@@ -262,23 +263,43 @@ def main(argv=None) -> int:
                       run_id=state["extra"].get("wandb_id") if args.resume else None, mode=args.wandb_mode,
                       tags=("GridZoneEnv", args.mode), group="GridZoneEnv")
 
+    val_date = args.val_date or args.eval_dates[0]
+    print("=" * 80)
+    print(f"Device: {args.device}")
+    print(f"Env: GridZoneEnv on {args.bundle}: {env.n_zones} zones of {args.cell_m:g} m, "
+          f"{args.days:g}-day episodes x {args.episodes}, validation every {args.val_every} on {val_date}")
+    print(f"Params: {params}")
+    print("=" * 80, flush=True)
+    # progress bar as in the legacy trainer: one tick per 3-hour slot, simulated clock in the description
+    bar = tqdm(total=slots_per_episode * args.episodes, initial=slots_per_episode * start_episode,
+               desc="Training computation is starting ", position=0, leave=True, dynamic_ncols=True)
+    out = bar.write                                     # prints above the bar without breaking it
+    current = {"ep": start_episode}
+
     def on_slot():
+        d = env.sim.datetime
+        bar.set_description(f"[TRAIN] Run {args.run_id}. Epis {current['ep']}, Week {d.isocalendar().week}, "
+                            f"{d:%A} at {d:%H:%M:%S}")
+        bar.set_postfix({"eps": round(agent.epsilon, 3)})
+        bar.update(1)
         slots["n"] += 1
         agent.update_epsilon()
         if slots["n"] % params["target_every_slots"] == 0:
             agent.update_target_network()
 
     val_env = None
-    val_date = args.val_date or args.eval_dates[0]
     stop_at = args.episodes if args.stop_after is None else min(args.episodes, start_episode + args.stop_after)
     for ep in range(start_episode, stop_at):
+        current["ep"] = ep
         res, s = run_episode(env, agent, seed=args.seed * 1000 + ep, device=args.device, learn=True, params=params,
                              on_slot=on_slot, cell_m=args.cell_m, episode=ep)
+        bar.n = slots_per_episode * (ep + 1)            # an episode may end between slot boundaries
+        bar.refresh()
         rm.save_episode(res)
         rm.save_run_summary()
-        print(f"ep {ep:3d} return {s['return']:9.1f} served {s['city_service_level']:.3f} moved {s['bikes_moved']:5d} "
+        out(f"ep {ep:3d} return {s['return']:9.1f} served {s['city_service_level']:.3f} moved {s['bikes_moved']:5d} "
               f"invalid {s['invalid']:5d}/{s['decisions']:5d} eps {s['epsilon']:.3f} loss {s['loss']:.4f} "
-              f"wall {s['wall_s']:.0f}s", flush=True)
+              f"wall {s['wall_s']:.0f}s")
         tracker.log({f"train/{k}": v for k, v in s.items()} | {"train/mean_daily_failures": res.mean_daily_failures,
                     "train/buffer": len(agent.replay_buffer)}, step=ep)
         if (ep + 1) % args.save_every == 0 or ep == args.episodes - 1:
@@ -286,6 +307,7 @@ def main(argv=None) -> int:
         if args.val_every and (ep + 1) % args.val_every == 0:
             if val_env is None:
                 val_env = make_env(args.bundle, [val_date], args.days, sim_config, args.cell_m)
+            bar.set_description(f"[VAL] Run {args.run_id}. After epis {ep}, greedy week from {val_date}")
             saved_eps = agent.epsilon
             vres, vs = run_episode(val_env, agent, seed=20_000, device=args.device, learn=False, params=params,
                                    cell_m=args.cell_m, episode=0, mode="validation")
@@ -300,12 +322,13 @@ def main(argv=None) -> int:
                 best_ep = ep
                 agent.save_model(rm.models_path / "model_best.pt")
                 tracker.summary({"best/val_city_service_level": best, "best/episode": ep})
-            print(f"val ep {ep:3d} ({val_date}): served {vs['city_service_level']:.4f} failures {vs['failed']} "
-                  f"{'NEW BEST' if improved else f'best {best:.4f}'}", flush=True)
+            out(f"val ep {ep:3d} ({val_date}): served {vs['city_service_level']:.4f} failures {vs['failed']} "
+                f"{'NEW BEST' if improved else f'best {best:.4f}'}")
         if args.checkpoint_every and (ep + 1) % args.checkpoint_every == 0:
             save_checkpoint(ckpt_dir, agent, {"slots": slots["n"], "best_val": best, "best_episode": best_ep,
                                               "wandb_id": tracker.id},
                             episode=ep, buffer=not args.no_buffer_checkpoint, keep=args.keep_checkpoints)
+    bar.close()
     if stop_at < args.episodes:
         print(f"stopped after episode {stop_at - 1}; continue with --resume", flush=True)
         tracker.finish()
@@ -325,16 +348,21 @@ def main(argv=None) -> int:
                          val_tag=f"final_episode_{args.episodes - 1:03d}")
     i = 0
     final_eval = []
+    ebar = tqdm(total=len(args.eval_dates) * args.eval_seeds, desc=f"[EVAL] Run {args.run_id}", leave=True,
+                dynamic_ncols=True)
     for d, day in enumerate(args.eval_dates):
         eval_env.start_dates = (day,)
         for s_ in range(args.eval_seeds):
+            ebar.set_description(f"[EVAL] Run {args.run_id}. Week from {day}, seed {s_}")
             res, s = run_episode(eval_env, agent, seed=10_000 + 100 * d + s_, device=args.device, learn=False,
                                  params=params, cell_m=args.cell_m, episode=i, mode="validation")
             val.save_episode(res)
             final_eval.append(s)
-            print(f"eval {day} seed {s_}: served {s['city_service_level']:.3f} moved {s['bikes_moved']} "
-                  f"failures {s['failed']}", flush=True)
+            ebar.write(f"eval {day} seed {s_}: served {s['city_service_level']:.3f} moved {s['bikes_moved']} "
+                       f"failures {s['failed']}")
+            ebar.update(1)
             i += 1
+    ebar.close()
     val.save_run_summary()
     tracker.summary({"eval/city_service_level": float(np.mean([e["city_service_level"] for e in final_eval])),
                      "eval/failed": float(np.mean([e["failed"] for e in final_eval]))})
